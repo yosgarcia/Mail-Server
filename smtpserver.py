@@ -1,7 +1,17 @@
 import argparse
 from twisted.mail import smtp
 from twisted.internet import defer, reactor
+
+from twisted.internet.defer import Deferred
+
+
+from twisted.cred import checkers, portal, credentials
+from twisted.cred.checkers import ICredentialsChecker
+
+from zope.interface import implementer
 import os
+import time
+
 
 
 # Leer parametros de la linea de comandos
@@ -19,61 +29,77 @@ def parse_arguments():
 
     return allowed_domains, args.mail_storage, args.port
 
-def validate_email_sender(helo, origin, allowed_domains):
-    domain = origin.domain.decode()
-
-    if domain in allowed_domains:
-        print(f"Email allowed from: {origin}")
-        return origin
-    else:
-        print(f"Email denied: {origin} does not belong to allowed domains")
-        raise smtp.SMTPBadSender(f"Email not allowed from {origin}")
 
 
-def save_email(mail_storage, mailfrom, rcptto, message):
-    try:
-        os.makedirs(mail_storage, exist_ok=True)  # Asegurar que la carpeta existe
-        
-        # Tomar solo el primer destinatario para nombrar el archivo
-        destinatario = rcptto[0].decode()
-        filepath = os.path.join(mail_storage, f"{destinatario}.txt")
+# Clase para manejar los mensajes
+@implementer(smtp.IMessage)
+class FileMessage:
+    def __init__(self, recipient, mail_storage):
+        self.recipient = recipient
+        self.mail_storage = mail_storage
+        self.lines = []
 
-        # Guardar el correo en el archivo
-        with open(filepath, "a", encoding="utf-8") as f:
-            f.write(f"De: {mailfrom}\n")
-            f.write(f"Para: {destinatario}\n\n")
-            f.write(message.decode())
-            f.write("\n" + "-" * 40 + "\n")  # Separador entre correos
-
-        print(f"Correo guardado en {filepath}")
-        return defer.succeed(None)  # Retorna una promesa de éxito
-
-    except Exception as e:
-        print(f"Error guardando correo: {e}")
-        return defer.fail(e)  # Retorna un error para que Twisted lo maneje
-
-def validate_email_recipient(user):
-    """Función para validar y gestionar el almacenamiento de correos para destinatarios"""
-    return lambda: save_email(user.dest)
+    def lineReceived(self, line):
+        if isinstance(line, bytes):
+            self.lines.append(line.decode('utf-8'))  # Decodificar si es bytes
+        else:
+            self.lines.append(line) 
 
 
-def smtp_protocol_factory(allowed_domains, mail_storage):
-    protocol = smtp.SMTP()
+    def eomReceived(self):
+        recipient_user, recipient_domain = self.recipient.split('@')
 
-    protocol.validateFrom = lambda helo, origin: validate_email_sender(helo, origin, allowed_domains)
+        recipient_dir = os.path.join(self.mail_storage, recipient_domain, recipient_user)
+        os.makedirs(recipient_dir, exist_ok=True)
 
-    protocol.validateTo = lambda user: validate_email_recipient(user)
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        email_filename = f"mail_{timestamp}.txt"
+        email_file_path = os.path.join(recipient_dir, email_filename)
+
+        with open(email_file_path, 'w') as f:
+            #f.write(f"FROM: {self.sender}\n")
+            f.write(f"TO: {self.recipient}\n")
+            f.write(f"MESSAGE:\n")
+            f.write("\n".join(self.lines))  
+        print(f"Mail saved to {email_file_path}")
+        return defer.succeed(None)
+
+    def connectionLost(self):
+        self.lines = None
 
 
 
-    return protocol
+@implementer(smtp.IMessageDelivery)
+class FileMessageDelivery:
+    def __init__(self, allowed_domains, mail_storage):
+        self.allowed_domains = allowed_domains
+        self.mail_storage = mail_storage
+    
+    def receivedHeader(self, helo, origin, recipients):
+        return f"FROM: {origin}"
+    
+    def validateFrom(self, helo, origin):
+        return origin # Se acepta cualquier remitente
+    
+    def validateTo(self, user):
+        recipient_domain = user.dest.domain.decode("utf-8")
+        if recipient_domain in self.allowed_domains:
+            return lambda: FileMessage(user.dest.local.decode("utf-8") + '@' + recipient_domain, self.mail_storage)
+        raise smtp.SMTPBadRcpt(user)
 
 
-def start_smtp_server(allowed_domains, mail_storage, port):
-    """Iniciar el servidor SMTP"""
-    print(f"Iniciando servidor SMTP en el puerto {port}...")
-    reactor.listenTCP(port, smtp.SMTPFactory(lambda: smtp_protocol_factory(allowed_domains, mail_storage)))  # Iniciar el servidor
-    reactor.run()  # Mantener el servidor corriendo
+# Clase para el servidor SMTP
+class FileSMTPFactory(smtp.SMTPFactory):
+    protocol = smtp.ESMTP
+
+    def __init__(self, allowed_domains, mail_storage):
+        self.delivery = FileMessageDelivery(allowed_domains, mail_storage)
+
+    def buildProtocol(self, addr):
+        p = smtp.SMTPFactory.buildProtocol(self, addr)
+        p.delivery = self.delivery
+        return p
+
 
 if __name__ == "__main__":
     domains, storage, port = parse_arguments()
@@ -81,4 +107,6 @@ if __name__ == "__main__":
     print(f"Almacenamiento de correos: {storage}")
     print(f"Puerto: {port}")
 
-    start_smtp_server(domains, storage, port)
+
+    reactor.listenTCP(port, FileSMTPFactory(domains, storage))
+    reactor.run()
