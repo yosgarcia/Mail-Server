@@ -1,7 +1,7 @@
 import argparse
 from twisted.mail import smtp
 from twisted.internet import defer, reactor
-
+import base64
 from twisted.internet.defer import Deferred
 
 
@@ -56,13 +56,37 @@ class FileMessage:
         email_filename = f"mail_{timestamp}.txt"
         email_file_path = os.path.join(recipient_dir, email_filename)
 
-        with open(email_file_path, 'w') as f:
-            #f.write(f"FROM: {self.sender}\n")
-            f.write(f"TO: {self.recipient}\n")
-            f.write(f"MESSAGE:\n")
-            f.write("\n".join(self.lines))  
-        print(f"Mail saved to {email_file_path}")
-        return defer.succeed(None)
+        # Convertir el mensaje en un string completo
+        full_message = "\n".join(self.lines)
+        if "Content-Transfer-Encoding: base64" in full_message:
+                parts = full_message.split("\n\n", 1)  # Separar encabezados del cuerpo
+                headers = parts[0]
+                body = parts[1] if len(parts) > 1 else ""
+
+                # Intentar decodificar el cuerpo en Base64
+                try:
+                    decoded_body = base64.b64decode(body).decode("utf-8")
+                except Exception as e:
+                    print(f"Error al decodificar Base64: {e}")
+                    decoded_body = body  # Si hay error, dejarlo como está
+
+                full_message = headers + "\n\n" + decoded_body  # Unir encabezados y mensaje
+
+        # Filtrar encabezados redundantes
+        filtered_lines = []
+        ignore_headers = {"MIME-Version:", "Content-Type:", "Content-Transfer-Encoding:"}
+
+        for line in full_message.split("\n"):
+            if not any(line.startswith(header) for header in ignore_headers):
+                filtered_lines.append(line)
+
+        cleaned_message = "\n".join(filtered_lines)
+
+        # Guardar el mensaje limpio
+        with open(email_file_path, 'w', encoding="utf-8") as f:
+            f.write(cleaned_message)  # Guardar solo el mensaje limpio
+            print(f"Mail saved to {email_file_path}")
+            return defer.succeed(None)
 
     def connectionLost(self):
         self.lines = None
@@ -76,7 +100,7 @@ class FileMessageDelivery:
         self.mail_storage = mail_storage
     
     def receivedHeader(self, helo, origin, recipients):
-        return f"FROM: {origin}"
+        return f""
     
     def validateFrom(self, helo, origin):
         return origin # Se acepta cualquier remitente

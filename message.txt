@@ -2,7 +2,7 @@ Hola, {name}, ¿cómo estás?
 
 Espero que estes teniendo un gran día.
 
-
+Recuerda que mañana tenemos reunión con el cliente a las 10:00 am.
 
 Saludos, 
 El equipo
