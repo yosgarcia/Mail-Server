@@ -1,3 +1,3 @@
-sender_email,name,recipient_email
-yosgar@santa.com,Leo Chacon,leochacon@norle.com
-yosgar@santa.com,Ian Paredes,ianparedes@santa.com
+sender_email,name,recipient_email,subject
+yosgar@santa.com,Leo Chacon,leochacon@northpole.com,Reunion con cliente
+yosgar@santa.com,Ian Paredes,ianparedes@santa.com,Reunion con cliente

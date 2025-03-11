@@ -23,12 +23,13 @@ def read_csv(file_path):
                 raise ValueError("File is empty or is not a valid CSV file")
             
             for row in reader:
-                if "name" not in row or "sender_email" not in row or "recipient_email" not in row:
-                    raise ValueError("CSV must contain columns: name, sender_email, recipient_email.")
+                if "name" not in row or "sender_email" not in row or "recipient_email" not in row or "subject" not in row:
+                    raise ValueError("CSV must contain columns: name, sender_email, recipient_email, subject.")
                 if not is_valid_email(row["sender_email"]) or not is_valid_email(row["recipient_email"]):
                     print(f"Wrong email detected: {row} - It will be omitted.")
                     continue  # Omitir correos inválidos
                 mail_data.append(row)
+
     except FileNotFoundError:
         print(f"File not found: {file_path}")
         sys.exit(1)
@@ -49,12 +50,12 @@ def handle_send_error(err, recipient):
         print(f"Error with email {recipient}: {err}")
 
 
-def send_mail(smtp_host, smtp_port, sender, recipient, message):
+def send_mail(smtp_host, smtp_port, sender, recipient, message, subject):
     # Mensaje en fromato MIME
     msg = MIMEText(message, "plain", "utf-8")
     msg["From"] = sender
     msg["To"] = recipient
-    msg["Subject"] = "Correo de prueba con Twisted"
+    msg["Subject"] = subject
 
     # Convertir a bytes para SMTP
     msg_data = msg.as_string()
@@ -99,7 +100,6 @@ def read_message(file_path):
 
 
 
-
 def main():
     """
     Función principal que procesa los parámetros y envía correos.
@@ -123,7 +123,7 @@ def main():
     deferreds = []
     for contacto in contactos:
         mensaje_personalizado = change_message(mensaje_template, contacto["name"], contacto["sender_email"], contacto["recipient_email"])
-        d = send_mail(smtp_host, smtp_port, contacto["sender_email"], contacto["recipient_email"], mensaje_personalizado)
+        d = send_mail(smtp_host, smtp_port, contacto["sender_email"], contacto["recipient_email"], mensaje_personalizado, contacto["subject"])
         deferreds.append(d)
 
     defer.DeferredList(deferreds).addCallback(lambda _: reactor.stop())
