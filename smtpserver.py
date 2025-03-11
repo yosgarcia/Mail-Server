@@ -4,8 +4,6 @@ from twisted.internet import defer, reactor
 import base64
 from twisted.internet.defer import Deferred
 
-
-from twisted.cred import checkers, portal, credentials
 from twisted.cred.checkers import ICredentialsChecker
 
 from zope.interface import implementer

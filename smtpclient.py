@@ -1,17 +1,52 @@
 import csv
 import sys
+import re
 from twisted.mail.smtp import sendmail
 from twisted.internet import reactor, defer
 from email.mime.text import MIMEText
 
+from twisted.python.failure import Failure
+
+def is_valid_email(email):
+    regex = r'^[\w\.-]+@[\w\.-]+\.\w+$'
+    return re.match(regex, email) is not None
+
 
 def read_csv(file_path):
     mail_data = []
-    with open(file_path, newline='', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            mail_data.append(row)
+
+    try:
+        with open(file_path, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+
+            if reader.fieldnames is None:
+                raise ValueError("File is empty or is not a valid CSV file")
+            
+            for row in reader:
+                if "name" not in row or "sender_email" not in row or "recipient_email" not in row:
+                    raise ValueError("CSV must contain columns: name, sender_email, recipient_email.")
+                if not is_valid_email(row["sender_email"]) or not is_valid_email(row["recipient_email"]):
+                    print(f"Wrong email detected: {row} - It will be omitted.")
+                    continue  # Omitir correos inválidos
+                mail_data.append(row)
+    except FileNotFoundError:
+        print(f"File not found: {file_path}")
+        sys.exit(1)
+    except ValueError as e:
+        print(f"Error in csv: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error reading csv: {e}")
+        sys.exit(1)
+
     return mail_data
+
+
+def handle_send_error(err, recipient):
+    if isinstance(err, Failure):
+        print(f"Error sendind email to {recipient}: {err.getErrorMessage()}")
+    else:
+        print(f"Error with email {recipient}: {err}")
 
 
 def send_mail(smtp_host, smtp_port, sender, recipient, message):
@@ -36,7 +71,7 @@ def send_mail(smtp_host, smtp_port, sender, recipient, message):
     )
     
     # Manejar la respuesta
-    d.addCallbacks(lambda _: print("Correo enviado con éxito!"), lambda err: print(f"Error: {err}"))
+    d.addCallbacks(lambda _: print(f"Mail sent to {recipient}!"), lambda err: handle_send_error(err, recipient))
     
 
     return d
@@ -51,8 +86,16 @@ def change_message(mail_data, name, sender_email, recipient_email):
 
 
 def read_message(file_path):
-    with open(file_path, "r", encoding="utf-8") as f:
-        return f.read().strip()  
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        print(f"File not found: {file_path}")
+        sys.exit(1) 
+    except Exception as e:
+        print(f"Error reading message file: {e}")
+        sys.exit(1) 
+
 
 
 
@@ -62,7 +105,7 @@ def main():
     Función principal que procesa los parámetros y envía correos.
     """
     if len(sys.argv) != 7 or sys.argv[1] != "-h" or sys.argv[3] != "-c" or sys.argv[5] != "-m":
-        print("Uso: python smtpclient.py -h <mail-server> -c <csv-file> -m <message-file>")
+        print("Use: python smtpclient.py -h <mail-server> -c <csv-file> -m <message-file>")
         sys.exit(1)
 
     smtp_host = sys.argv[2]
@@ -72,6 +115,10 @@ def main():
 
     contactos = read_csv(csv_file)
     mensaje_template = read_message(message_file)
+
+    if not contactos:
+        print("There are not valid emails on CSV file. Stopping program...")
+        sys.exit(1)
 
     deferreds = []
     for contacto in contactos:
