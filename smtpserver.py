@@ -1,14 +1,19 @@
 import argparse
 from twisted.mail import smtp
-from twisted.internet import defer, reactor
+from twisted.internet import defer, reactor, ssl
 import base64
 from twisted.internet.defer import Deferred
-
+import csv
+from twisted.cred.portal import Portal
 from twisted.cred.checkers import ICredentialsChecker
-
+from twisted.cred.credentials import IUsernamePassword, UsernamePassword
 from zope.interface import implementer
+from twisted.cred.error import UnauthorizedLogin
 import os
 import time
+from email import message_from_string
+from email.header import decode_header
+from email.utils import parseaddr
 
 
 
@@ -28,7 +33,6 @@ def parse_arguments():
     return allowed_domains, args.mail_storage, args.port
 
 
-
 # Clase para manejar los mensajes
 @implementer(smtp.IMessage)
 class FileMessage:
@@ -46,45 +50,55 @@ class FileMessage:
 
     def eomReceived(self):
         recipient_user, recipient_domain = self.recipient.split('@')
-
         recipient_dir = os.path.join(self.mail_storage, recipient_domain, recipient_user)
         os.makedirs(recipient_dir, exist_ok=True)
 
         timestamp = time.strftime("%Y%m%d-%H%M%S")
-        email_filename = f"mail_{timestamp}.txt"
+        base_filename = f"mail_{timestamp}"
+        email_filename = f"{base_filename}.eml"  # Guardaremos el correo en formato .eml
         email_file_path = os.path.join(recipient_dir, email_filename)
 
-        # Convertir el mensaje en un string completo
+        # Juntar todas las líneas en un solo string (mensaje RAW)
         full_message = "\n".join(self.lines)
-        if "Content-Transfer-Encoding: base64" in full_message:
-                parts = full_message.split("\n\n", 1)  # Separar encabezados del cuerpo
-                headers = parts[0]
-                body = parts[1] if len(parts) > 1 else ""
 
-                # Intentar decodificar el cuerpo en Base64
-                try:
-                    decoded_body = base64.b64decode(body).decode("utf-8")
-                except Exception as e:
-                    print(f"Error al decodificar Base64: {e}")
-                    decoded_body = body  # Si hay error, dejarlo como está
-
-                full_message = headers + "\n\n" + decoded_body  # Unir encabezados y mensaje
-
-        # Filtrar encabezados redundantes
-        filtered_lines = []
-        ignore_headers = {"MIME-Version:", "Content-Type:", "Content-Transfer-Encoding:"}
-
-        for line in full_message.split("\n"):
-            if not any(line.startswith(header) for header in ignore_headers):
-                filtered_lines.append(line)
-
-        cleaned_message = "\n".join(filtered_lines)
-
-        # Guardar el mensaje limpio
+        # Guardar el mensaje RAW en formato .eml
         with open(email_file_path, 'w', encoding="utf-8") as f:
-            f.write(cleaned_message)  # Guardar solo el mensaje limpio
-            print(f"Mail saved to {email_file_path}")
-            return defer.succeed(None)
+            f.write(full_message)
+        print(f"Mail saved in: {email_file_path}")
+
+        # Procesar el mensaje MIME para extraer adjuntos y asociarlos
+        mime_msg = message_from_string(full_message)
+        attachments = []
+        if mime_msg.is_multipart():
+            attachments_dir = os.path.join(recipient_dir, "attachments")
+            os.makedirs(attachments_dir, exist_ok=True)
+            for part in mime_msg.walk():
+                # Ignorar contenedores multipart
+                if part.get_content_maintype() == "multipart":
+                    continue
+                content_disp = part.get("Content-Disposition", "")
+                if content_disp and "attachment" in content_disp.lower():
+                    filename = part.get_filename()
+                    if not filename:
+                        filename = f"attachment_{timestamp}"
+                    file_path = os.path.join(attachments_dir, filename)
+                    with open(file_path, "wb") as af:
+                        af.write(part.get_payload(decode=True))
+                    attachments.append(filename)
+                    print(f"Attachment saved in: {file_path}")
+
+        # Guardar un archivo de metadatos si se encontraron adjuntos
+        if attachments:
+            meta_filename = f"{base_filename}.meta"
+            meta_file_path = os.path.join(recipient_dir, meta_filename)
+            with open(meta_file_path, 'w', encoding="utf-8") as mf:
+                mf.write("Attachments:\n")
+                for att in attachments:
+                    mf.write(att + "\n")
+            print(f"Metadata saved in: {meta_file_path}")
+
+        return defer.succeed(None)
+
 
     def connectionLost(self):
         self.lines = None
@@ -112,7 +126,6 @@ class FileMessageDelivery:
 
 # Clase para el servidor SMTP
 class FileSMTPFactory(smtp.SMTPFactory):
-    protocol = smtp.ESMTP
 
     def __init__(self, allowed_domains, mail_storage):
         self.delivery = FileMessageDelivery(allowed_domains, mail_storage)
@@ -123,12 +136,12 @@ class FileSMTPFactory(smtp.SMTPFactory):
         return p
 
 
+
 if __name__ == "__main__":
     domains, storage, port = parse_arguments()
-    print(f"Dominios permitidos: {domains}")
-    print(f"Almacenamiento de correos: {storage}")
-    print(f"Puerto: {port}")
-
+    print(f"Allowed domains: {domains}")
+    print(f"Mail storage: {storage}")
+    print(f"Port: {port}")
 
     reactor.listenTCP(port, FileSMTPFactory(domains, storage))
     reactor.run()
