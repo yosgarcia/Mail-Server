@@ -1,6 +1,6 @@
 import argparse
 from twisted.mail import smtp
-from twisted.internet import defer, reactor, ssl
+from twisted.internet import defer, reactor
 import base64
 from twisted.internet.defer import Deferred
 import csv
@@ -145,3 +145,15 @@ if __name__ == "__main__":
 
     reactor.listenTCP(port, FileSMTPFactory(domains, storage))
     reactor.run()
+
+
+
+# TO DO:
+# SMTPserver:
+#    - seguridad SSL/TLS
+# Servidor IMAP
+#    - Autenticación de usuarios
+#    - Leer correos
+#    - Eliminar correos
+#    - Seguridad SSL/TLS
+# NNTP-Notifier

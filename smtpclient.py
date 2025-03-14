@@ -111,7 +111,7 @@ def main():
     smtp_host = sys.argv[2]
     csv_file = sys.argv[4]
     message_file = sys.argv[6]
-    smtp_port = 2525  # Cambia esto si tu servidor usa otro puerto
+    smtp_port = 2525  
 
     contactos = read_csv(csv_file)
     mensaje_template = read_message(message_file)
@@ -128,8 +128,6 @@ def main():
 
     defer.DeferredList(deferreds).addCallback(lambda _: reactor.stop())
     reactor.run()
-
-
 
 
 
