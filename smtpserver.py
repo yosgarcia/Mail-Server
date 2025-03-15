@@ -3,6 +3,8 @@ from twisted.mail import smtp
 from twisted.internet import defer, reactor
 import base64
 from twisted.internet.defer import Deferred
+from twisted.internet import ssl
+
 import csv
 from twisted.cred.portal import Portal
 from twisted.cred.checkers import ICredentialsChecker
@@ -68,7 +70,7 @@ class FileMessage:
 
         # Procesar el mensaje MIME para extraer adjuntos y asociarlos
         mime_msg = message_from_string(full_message)
-        attachments = []
+        '''attachments = []
         if mime_msg.is_multipart():
             attachments_dir = os.path.join(recipient_dir, "attachments")
             os.makedirs(attachments_dir, exist_ok=True)
@@ -96,7 +98,7 @@ class FileMessage:
                 for att in attachments:
                     mf.write(att + "\n")
             print(f"Metadata saved in: {meta_file_path}")
-
+'''
         return defer.succeed(None)
 
 

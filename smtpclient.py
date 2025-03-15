@@ -51,6 +51,7 @@ def handle_send_error(err, recipient):
 
 
 def send_mail(smtp_host, smtp_port, sender, recipient, message, subject):
+
     # Mensaje en fromato MIME
     msg = MIMEText(message, "plain", "utf-8")
     msg["From"] = sender

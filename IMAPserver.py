@@ -1,11 +1,14 @@
 import argparse
-import os, sys, time
+import os, sys, time, re, json
 from twisted.internet import reactor, protocol, defer
 from twisted.mail import imap4
 from zope.interface import implementer
 
 from twisted.protocols.basic import LineReceiver
 
+
+import email
+from email import policy
 
 # Función para parsear los argumentos
 def parse_arguments():
@@ -17,10 +20,23 @@ def parse_arguments():
 
     return args.mail_storage, args.port
 
-USERS = {
-    "ianparedes@santa.com": "password123",
-    "leochacon@northpole.com" : "1234"
-}
+
+def load_users_from_json(file_path):
+    if not os.path.exists(file_path):
+        print(f"[ERROR] Users file {file_path} not found")
+        return {}
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            users = json.load(f)
+            return users
+    except Exception as e:
+        print(f"[ERROR] No se pudo cargar el archivo JSON: {e}")
+        return {}
+    
+# Carga los usuarios al iniciar el servidor
+USERS_FILE = "users.json"
+USERS = load_users_from_json(USERS_FILE)
+
 
 class IMAPServer(LineReceiver):
     """
@@ -45,6 +61,36 @@ class IMAPServer(LineReceiver):
     def connectionMade(self):
         print("[INFO] Nueva conexión establecida desde:", self.transport.getPeer())
         self.sendLine(b'* OK IMAP4rev1 Service Ready')
+
+
+    def load_mailbox(self):
+        """Recarga la lista de correos desde el disco para incluir nuevos mensajes."""
+        if not self.user_dir:
+            return
+
+        self.mailbox = {}  # Resetear el diccionario
+        try:
+            files = os.listdir(self.user_dir)
+        except Exception as e:
+            print(f"[ERROR] No se pudo acceder al buzón: {e}")
+            return
+
+        eml_files = [f for f in files if f.endswith('.eml')]
+        eml_files.sort()
+        
+        for i, filename in enumerate(eml_files, start=1):
+            fullpath = os.path.join(self.user_dir, filename)
+            size = os.path.getsize(fullpath)
+            internal_date = time.strftime('%d-%b-%Y %H:%M:%S +0000', time.gmtime(os.path.getmtime(fullpath)))
+            
+            self.mailbox[i] = {
+                'filename': filename,
+                'path': fullpath,
+                'size': size,
+                'flags': [],
+                'internal_date': internal_date
+            }
+
 
     def lineReceived(self, line):
         print(f"[DEBUG] Comando recibido: {line}")
@@ -91,21 +137,47 @@ class IMAPServer(LineReceiver):
 
     def parse_uid_range(self, uid_range):
         """
-        Analiza el rango de UIDs y devuelve una lista de UIDs válidos.
-        Soporta rangos como '1:*' (todos los UIDs) o '1,2,3' (UIDs específicos).
+        Parseamos el rango de UIDs y lo convertimos a una lista de UIDs.
+        Si el rango tiene el formato "1:*" o "*", se considera como todos los UIDs.
+        Si es un rango como "1:5" o "5:1", se lo invierte y genera el rango adecuado.
+        Ejemplo:
+            "1:5" -> [1, 2, 3, 4, 5]
+            "5:1" -> [1, 2, 3, 4, 5] (invertido)
+            "*": Considera todos los UIDs disponibles.
         """
         uids = []
-        if uid_range == '1:*':
-            uids = list(self.mailbox.keys())  # Devolvemos todos los UIDs
+        
+        # Caso con * (todos los UIDs)
+        if '*' in uid_range:
+            if uid_range == "*":
+                # Si el rango es solo *, devolvemos todos los UIDs posibles
+                return list(self.mailbox.keys())
+            else:
+                # Si es algo como "1:*", lo convertimos en un rango "1:último UID"
+                parts = uid_range.split(':')
+                if len(parts) == 2 and parts[1] == "*":
+                    start = int(parts[0])
+                    end = len(self.mailbox)  # Usamos el último UID
+                    uids = list(range(start, end + 1))
+        
+        # Caso con rango específico "start:end"
+        elif ':' in uid_range:
+            start, end = uid_range.split(':')
+            start = int(start)
+            end = int(end)
+            
+            # Aseguramos que el rango esté ordenado correctamente (menor a mayor)
+            if start > end:
+                start, end = end, start  # Invertimos el rango si está en orden incorrecto
+                
+            uids = list(range(start, end + 1))  # Creamos el rango de UIDs
+        
+        # Caso de un solo UID
         else:
-            # Analizamos un rango específico
             try:
-                for part in uid_range.split(','):
-                    uid = int(part)
-                    if uid in self.mailbox:
-                        uids.append(uid)
+                uids = [int(uid_range)]
             except ValueError:
-                return []  # Si no podemos analizar el rango, devolvemos una lista vacía
+                return None
 
         return uids
 
@@ -113,69 +185,134 @@ class IMAPServer(LineReceiver):
 
     def cmd_UID_FETCH(self, tag, args):
         """
-        Manejamos el comando UID FETCH.
-        Esperamos un rango de UID y el parámetro (FLAGS o BODY[]).
-        Ejemplo: UID FETCH 1:* (FLAGS)
-                UID FETCH 1:* (BODY[])
+        Manejamos el comando UID FETCH. Se espera que se envíe un rango de UID y una solicitud compuesta,
+        por ejemplo:
+        UID FETCH 1:3 (UID RFC822.SIZE FLAGS BODY.PEEK[HEADER.FIELDS (From To Cc Bcc Subject Date Message-ID Priority X-Priority References Newsgroups In-Reply-To Content-Type Reply-To)])
         """
-        # Verificamos que el comando esté bien formado
+        self.load_mailbox()  # Actualizar antes de responder
+
         if len(args) < 2:
-            self.sendLine((tag + " BAD UID FETCH requiere UID y datos adicionales").encode())
+            self.sendLine(f"{tag} BAD UID FETCH requiere UID y datos adicionales".encode())
             return
-        print("HOLLLSAA" + args[0])
-        print("HOLLLSAA" + args[1])
+
         uid_range = args[0]
-        data_item = args[1].upper()
-
-        # Parseamos los UIDs, pueden ser un rango como "1:*" o una lista de UIDs específicos
-        uids = self.parse_uid_range(uid_range)  # Parseamos el rango de UIDs
-
+        data_item_full = " ".join(args[1:]).strip()
+        print(f"Comando recibido: {uid_range}")
+        print(f"Parámetros completos: {data_item_full}")
+        
+        # Parseamos los UIDs (rango o comodín "*")
+        uids = self.parse_uid_range(uid_range)
         if not uids:
-            self.sendLine((tag + " BAD Rango de UID inválido").encode())
+            self.sendLine(f"{tag} BAD Rango de UID inválido".encode())
             return
 
-        if data_item == "(FLAGS)":  # Solo devuelve las flags
-            # Respondemos con las banderas para cada UID
-            for uid in uids:
-                if uid in self.mailbox:
-                    flags = self.mailbox[uid].get('flags', [])
-                    flags_str = ' '.join(flags) if flags else '\\Seen'  # Por ejemplo, solo \\Seen si no hay banderas
-                    self.sendLine(f'* {uid} FETCH (FLAGS ({flags_str}))'.encode())
-                else:
-                    self.sendLine(f'* {uid} NO No existe el mensaje').encode()
+        # Procesamos la solicitud compuesta con una expresión regular
+        pattern = r"^\(UID\s+RFC822\.SIZE\s+FLAGS\s+BODY\.PEEK\[HEADER\.FIELDS\s+\((?P<fields>.+)\)\]\)$"
+        m = re.match(pattern, data_item_full, re.IGNORECASE)
 
-        #elif data_item == "(BODY[])":  # Devuelve el cuerpo del mensaje
-            # Obtener los mensajes solicitados
+        if m:
+            fields_str = m.group("fields")
+            fields = fields_str.split()  # Dividir los campos solicitados
+            
+            # Preparamos la respuesta para cada UID
             for uid in uids:
-                msg = self.mailbox[uid]
+                msg = self.mailbox.get(uid)
+                if not msg:
+                    self.sendLine(f'* {uid} NO No existe el mensaje'.encode())
+                    continue
+
                 try:
                     with open(msg['path'], 'rb') as f:
                         content = f.read()
-                except Exception as e:
-                    self.sendLine((tag + " NO Error leyendo el mensaje").encode())
+
+                    msg_obj = email.message_from_bytes(content, policy=policy.default)
+                except Exception:
+                    self.sendLine(f"{tag} NO Error leyendo el mensaje".encode())
                     return
-                print("[DEBUG] Enviando mensaje:", msg['filename'])
-                # Se indica el literal (la cantidad de bytes)
-                literal = b'{%d+}' % (len(content),)
-                # Respuesta FETCH untagged (para simplificar, se envía en una sola respuesta)
-                self.sendLine((f'* {uid} FETCH (BODY[] {literal.decode()})').encode())
-                # Enviamos el literal (contenido) y terminamos con CRLF
+
+                # Obtenemos las flags
+                flags = msg.get('flags', [])
+                flags_str = ' '.join(flags) if flags else '\\Seen'
+                
+                # Preparamos los encabezados solicitados
+                header_fields = []
+                for field in fields:
+                    header_value = msg_obj.get(field, '')
+                    if header_value:  # Solo añadimos los campos que realmente existen
+                        header_fields.append(f"{field}: {header_value}")
+                
+                # Si no hay encabezados solicitados, enviamos un campo vacío
+                if not header_fields:
+                    self.sendLine(f"{tag} NO No se encontraron los encabezados solicitados".encode())
+                    return
+
+                # Unimos todos los encabezados
+                headers_str = "\r\n".join(header_fields)
+                
+                # Enviamos el literal de los encabezados
+                literal = f'{{{len(headers_str.encode())}}}'
+                self.sendLine(f'* {uid} FETCH (UID {uid} RFC822.SIZE {len(content)} FLAGS ({flags_str}) BODY.PEEK[HEADER.FIELDS ({", ".join(fields)})] {literal})'.encode())
+                self.transport.write(headers_str.encode() + b'\r\n')
+                self.sendLine(f"{tag} OK UID FETCH completado".encode())
+
+                print("[DEBUG] Enviando encabezados:", headers_str)
+
+                # Enviamos el cuerpo completo (BODY[])
+                body_literal = f'{{{len(content)}}}'
+                self.sendLine(f'* {uid} FETCH (BODY[] {body_literal})'.encode())
                 self.transport.write(content + b'\r\n')
 
+            self.sendLine(f"{tag} OK UID FETCH completado".encode())
+            return
+
+        # Si la solicitud no es la compuesta, se manejan otros casos (FLAGS, BODY[])
+        elif data_item_full.upper() == "(FLAGS)":
+            for uid in uids:
+                msg = self.mailbox.get(uid)
+                if msg:
+                    flags = msg.get('flags', [])
+                    flags_str = ' '.join(flags) if flags else '\\Seen'
+                    self.sendLine(f'* {uid} FETCH (UID {uid} FLAGS ({flags_str}))'.encode())
+                else:
+                    self.sendLine(f'* {uid} NO No existe el mensaje'.encode())
+            self.sendLine(f"{tag} OK UID FETCH completado".encode())
+            return
+
+        elif data_item_full.upper() == "(BODY[])":
+            for uid in uids:
+                msg = self.mailbox.get(uid)
+                if not msg:
+                    self.sendLine(f'* {uid} NO No existe el mensaje'.encode())
+                    continue
+
+                try:
+                    with open(msg['path'], 'rb') as f:
+                        content = f.read()
+                except Exception:
+                    self.sendLine(f"{tag} NO Error leyendo el mensaje".encode())
+                    return
+
+                literal = f'{{{len(content)}}}'
+                flags = msg.get('flags', [])
+                flags_str = ' '.join(flags) if flags else '\\Seen'
+                self.sendLine(f'* {uid} FETCH (UID {uid} FLAGS ({flags_str}) BODY[] {literal})'.encode())
+                self.transport.write(content + b'\r\n')
+
+            self.sendLine(f"{tag} OK UID FETCH completado".encode())
+            return
+
         else:
-            self.sendLine((tag + " BAD Solo se admite (FLAGS) o (BODY[])").encode())
-
-        # Finalizamos la respuesta del comando UID FETCH
-        self.sendLine((tag + " OK UID FETCH completado").encode())
-
-
+            self.sendLine(f"{tag} BAD Solo se admite (FLAGS), (BODY[]) o la solicitud compuesta (UID RFC822.SIZE FLAGS BODY.PEEK[HEADER.FIELDS (...)])".encode())
+            return
+        
+    
     def cmd_NOOP(self, tag, args):
         # El comando NOOP no hace nada, simplemente respondemos con OK
         self.sendLine((tag + " OK NOOP completado").encode())
 
     def cmd_CAPABILITY(self, tag, args):
         # Respuesta a la capacidad. Se podría ampliar si se desean otras extensiones.
-        self.sendLine(b'* CAPABILITY IMAP4rev1')
+        self.sendLine(b'* CAPABILITY IMAP4rev1 LITERAL+')
         self.sendLine((tag + " OK CAPABILITY completado").encode())
 
     def cmd_LOGIN(self, tag, args):
@@ -186,33 +323,24 @@ class IMAPServer(LineReceiver):
 
         username = args[0].strip('"')
         password = args[1].strip('"')
-        print(f"[DEBUG] Intentando login con usuario: {username} y contraseña: {password}")
-
         # Para este ejemplo se acepta cualquier contraseña si el directorio existe.
         if '@' not in username:
             self.sendLine((tag + " NO Formato de usuario inválido").encode())
             print(f"[DEBUG] no tiene arroba: {username} y contraseña: {password}")
-
             return
         user, domain = username.split('@', 1)
         user_dir = os.path.join(self.mail_storage, domain, user)
-        print(f"[DEBUG] user_dir: {user_dir}")
         if not os.path.isdir(user_dir):
-            self.sendLine((tag + " NO Usuario no encontrado").encode())
+            self.sendLine((tag + " NO Usuario no tiene directorio").encode())
             return
+        print(f"[DEBUG] Intentando login con usuario: {username}")
 
-
-        # Validación de usuario y contraseña
         if username not in USERS:
             self.sendLine((tag + " NO Usuario no encontrado").encode())
-            print(f"[DEBUG] usuario not in users: {username} y contraseña: {password}")
-
             return
-        
-        if USERS[username] != password:
-            self.sendLine((tag + " NO Contraseña incorrecta").encode())
-            print(f"[DEBUG] contraseña erronea: {username} y contraseña: {password}")
 
+        if USERS[username]["password"] != password:
+            self.sendLine((tag + " NO Contraseña incorrecta").encode())
             return
 
         print(f"[INFO] Login exitoso para {username}")
@@ -270,6 +398,9 @@ class IMAPServer(LineReceiver):
         self.sendLine((tag + " OK [READ-WRITE] SELECT completado").encode())
 
     def cmd_FETCH(self, tag, args):
+
+        self.load_mailbox()  # Actualizar antes de responder
+
         # Se espera el formato: FETCH <num_msg> (BODY[])
         if self.state != 'SELECTED':
             self.sendLine((tag + " NO Buzón no seleccionado").encode())
@@ -278,7 +409,7 @@ class IMAPServer(LineReceiver):
         if len(args) < 2:
             self.sendLine((tag + " BAD FETCH requiere número de mensaje y data item").encode())
             return
-        print("AQUIIIIIIII")
+        
         msg_set = args[0]
         data_item = args[1]
         
