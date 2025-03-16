@@ -137,6 +137,7 @@ class IMAPServer(LineReceiver):
             return
 
         # Se espera que la línea tenga el formato: <tag> <COMANDO> [argumentos...]
+        print(f"[DEBUG] Command received: {line}")
         parts = line.split()
         if not parts:
             return
@@ -270,7 +271,7 @@ class IMAPServer(LineReceiver):
 
                 
                 flags = msg.get('flags', [])
-                flags_str = ' '.join(flags) if flags else '\\Seen'
+                flags_str = ' '.join(flags) if flags else []#'\\Seen'
                 
                 
                 header_fields = []
@@ -292,10 +293,9 @@ class IMAPServer(LineReceiver):
                 self.sendLine(f"{tag} OK UID FETCH completed".encode())
 
 
-                # Enviamos el cuerpo completo (BODY[])
-                body_literal = f'{{{len(content)}}}'
+                """body_literal = f'{{{len(content)}}}'
                 self.sendLine(f'* {uid} FETCH (BODY[] {body_literal})'.encode())
-                self.transport.write(content + b'\r\n')
+                self.transport.write(content + b'\r\n')"""
 
             self.sendLine(f"{tag} OK UID FETCH completed".encode())
             return
@@ -417,7 +417,26 @@ class IMAPServer(LineReceiver):
             return
 
         
-        self.mailbox = self.load_mailbox()
+        self.mailbox = {}
+        try:
+            files = os.listdir(self.user_dir)
+        except Exception as e:
+            self.sendLine((tag + " NO Error accediendo al buzón").encode())
+            return
+
+        # Se filtran los archivos .eml
+        eml_files = [f for f in files if f.endswith('.eml')]
+        eml_files.sort()  # Ordenamos (por ejemplo alfabéticamente)
+        for i, filename in enumerate(eml_files, start=1):
+            fullpath = os.path.join(self.user_dir, filename)
+            size = os.path.getsize(fullpath)
+            # Se utiliza la fecha de modificación como fecha interna (internal date)
+            internal_date = time.strftime('%d-%b-%Y %H:%M:%S +0000', time.gmtime(os.path.getmtime(fullpath)))
+            self.mailbox[i] = {'filename': filename,
+                               'path': fullpath,
+                               'size': size,
+                               'flags': [],
+                               'internal_date': internal_date}
         
         message_count = len(self.mailbox)
         self.state = 'SELECTED'
