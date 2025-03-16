@@ -1,18 +1,9 @@
-import argparse
+import argparse, os, time, nntplib, json
 from twisted.mail import smtp
 from twisted.internet import defer, reactor
-import base64
 from twisted.internet.defer import Deferred
 from twisted.internet import ssl
-
-import csv
-from twisted.cred.portal import Portal
-from twisted.cred.checkers import ICredentialsChecker
-from twisted.cred.credentials import IUsernamePassword, UsernamePassword
 from zope.interface import implementer
-from twisted.cred.error import UnauthorizedLogin
-import os
-import time
 from email import message_from_string
 from email.header import decode_header
 from email.utils import parseaddr
@@ -33,6 +24,58 @@ def parse_arguments():
     allowed_domains = args.domains.split(",")
 
     return allowed_domains, args.mail_storage, args.port
+
+
+def load_users_from_json(file_path):
+    if not os.path.exists(file_path):
+        print(f"[ERROR] Users file {file_path} not found")
+        return {}
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            users = json.load(f)
+            return users
+    except Exception as e:
+        print(f"[ERROR] No se pudo cargar el archivo JSON: {e}")
+        return {}
+    
+
+# Configuración del servidor NNTP público
+NNTP_SERVER = "news.aioe.org"  # Servidor NNTP público
+NNTP_PORT = 119  # Puerto NNTP estándar
+NNTP_GROUP = "alt.test"  # Grupo de prueba
+
+def notify_nntp(user, subject):
+    """Notifica a un servidor NNTP sobre un nuevo correo"""
+    if user not in USERS or not USERS[user].get("nntp_enabled", False):
+        return  
+
+    nntp_server = USERS[user]["nntp_server"]
+    nntp_group = USERS[user]["nntp_group"]
+
+    try:
+        print(f"[INFO] Conectando a NNTP {nntp_server} para notificar a {user}")
+
+        with nntplib.NNTP(nntp_server) as nntp:
+            # Construcción del mensaje NNTP
+            message = f"""\
+                Newsgroups: {nntp_group}
+                Subject: Nuevo correo para {user}
+                From: smtp-server@santa.com
+                Date: {time.strftime("%a, %d %b %Y %H:%M:%S")}
+                Message-ID: <{int(time.time())}@{nntp_server}>
+
+                Se ha recibido un nuevo correo para {user}.
+                Asunto: {subject}
+                """
+
+            response = nntp.post(message.split("\n"))  # Enviar mensaje NNTP
+            print(f"[INFO] Notificación NNTP enviada: {response}")
+
+    except Exception as e:
+        print(f"[ERROR] No se pudo notificar NNTP para {user}: {e}")
+
+
+
 
 
 # Clase para manejar los mensajes
@@ -68,37 +111,8 @@ class FileMessage:
             f.write(full_message)
         print(f"Mail saved in: {email_file_path}")
 
-        # Procesar el mensaje MIME para extraer adjuntos y asociarlos
-        mime_msg = message_from_string(full_message)
-        '''attachments = []
-        if mime_msg.is_multipart():
-            attachments_dir = os.path.join(recipient_dir, "attachments")
-            os.makedirs(attachments_dir, exist_ok=True)
-            for part in mime_msg.walk():
-                # Ignorar contenedores multipart
-                if part.get_content_maintype() == "multipart":
-                    continue
-                content_disp = part.get("Content-Disposition", "")
-                if content_disp and "attachment" in content_disp.lower():
-                    filename = part.get_filename()
-                    if not filename:
-                        filename = f"attachment_{timestamp}"
-                    file_path = os.path.join(attachments_dir, filename)
-                    with open(file_path, "wb") as af:
-                        af.write(part.get_payload(decode=True))
-                    attachments.append(filename)
-                    print(f"Attachment saved in: {file_path}")
+        
 
-        # Guardar un archivo de metadatos si se encontraron adjuntos
-        if attachments:
-            meta_filename = f"{base_filename}.meta"
-            meta_file_path = os.path.join(recipient_dir, meta_filename)
-            with open(meta_file_path, 'w', encoding="utf-8") as mf:
-                mf.write("Attachments:\n")
-                for att in attachments:
-                    mf.write(att + "\n")
-            print(f"Metadata saved in: {meta_file_path}")
-'''
         return defer.succeed(None)
 
 
@@ -137,25 +151,17 @@ class FileSMTPFactory(smtp.SMTPFactory):
         p.delivery = self.delivery
         return p
 
-
+# Carga los usuarios al iniciar el servidor
+USERS_FILE = "users.json"
+USERS = load_users_from_json(USERS_FILE)
 
 if __name__ == "__main__":
     domains, storage, port = parse_arguments()
     print(f"Allowed domains: {domains}")
     print(f"Mail storage: {storage}")
     print(f"Port: {port}")
-
+    
     reactor.listenTCP(port, FileSMTPFactory(domains, storage))
     reactor.run()
 
 
-
-# TO DO:
-# SMTPserver:
-#    - seguridad SSL/TLS
-# Servidor IMAP
-#    - Autenticación de usuarios
-#    - Leer correos
-#    - Eliminar correos
-#    - Seguridad SSL/TLS
-# NNTP-Notifier

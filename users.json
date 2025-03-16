@@ -1,8 +1,20 @@
 {
     "ianparedes@santa.com": {
-        "password": "password123"
+        "password": "password123",
+        "nntp_enabled": true,
+        "nntp_server": "local",
+        "nntp_group": "alt.test"
     },
     "leochacon@northpole.com": {
-        "password": "1234"
+        "password": "1234",
+        "nntp_enabled": false
+    },
+    "auchaves@santa.com": {
+        "password": "1234",
+        "nntp_enabled": false
+    },
+    "alevera@northpole.com": {
+        "password": "1234",
+        "nntp_enabled": false
     }
 }
