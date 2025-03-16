@@ -1,18 +1,22 @@
-import argparse, os, time, nntplib, json
+import argparse, os, time, json
 from twisted.mail import smtp
 from twisted.internet import defer, reactor
 from twisted.internet.defer import Deferred
 from twisted.internet import ssl
 from zope.interface import implementer
-from email import message_from_string
-from email.header import decode_header
-from email.utils import parseaddr
 
 
 
-# Leer parametros de la linea de comandos
-# y separar los dominios permitidos
 def parse_arguments():
+    """
+    Función encargada para leer los argumentos de la línea de comandos.
+
+    Returns:
+        allowed_domains (list): Lista de dominios permitidos.
+        mail_storage (str): Directorio de almacenamiento.
+        port (int): Puerto a escuchar.
+    
+    """
     parser = argparse.ArgumentParser(description="SMTP Server")
     parser.add_argument("-d", "--domains", required=True, help="List of allowed domains separated by commas")
     parser.add_argument("-s", "--mail-storage", required=True, help="Directory to store emails")
@@ -20,13 +24,23 @@ def parse_arguments():
     
     args = parser.parse_args()
 
-    # lista de dominios que se pueden aceptar
     allowed_domains = args.domains.split(",")
 
     return allowed_domains, args.mail_storage, args.port
 
 
 def load_users_from_json(file_path):
+    """
+    Función encargada de leer los usuarios desde un archivo JSON.
+
+    Args:
+        file_path (str): Ruta del archivo JSON.
+    
+    Returns:
+        users (dict): Diccionario con los usuarios.
+
+    """
+    # Valida que el archivo exista
     if not os.path.exists(file_path):
         print(f"[ERROR] Users file {file_path} not found")
         return {}
@@ -39,80 +53,64 @@ def load_users_from_json(file_path):
         return {}
     
 
-# Configuración del servidor NNTP público
-NNTP_SERVER = "news.aioe.org"  # Servidor NNTP público
-NNTP_PORT = 119  # Puerto NNTP estándar
-NNTP_GROUP = "alt.test"  # Grupo de prueba
-
-def notify_nntp(user, subject):
-    """Notifica a un servidor NNTP sobre un nuevo correo"""
-    if user not in USERS or not USERS[user].get("nntp_enabled", False):
-        return  
-
-    nntp_server = USERS[user]["nntp_server"]
-    nntp_group = USERS[user]["nntp_group"]
-
-    try:
-        print(f"[INFO] Conectando a NNTP {nntp_server} para notificar a {user}")
-
-        with nntplib.NNTP(nntp_server) as nntp:
-            # Construcción del mensaje NNTP
-            message = f"""\
-                Newsgroups: {nntp_group}
-                Subject: Nuevo correo para {user}
-                From: smtp-server@santa.com
-                Date: {time.strftime("%a, %d %b %Y %H:%M:%S")}
-                Message-ID: <{int(time.time())}@{nntp_server}>
-
-                Se ha recibido un nuevo correo para {user}.
-                Asunto: {subject}
-                """
-
-            response = nntp.post(message.split("\n"))  # Enviar mensaje NNTP
-            print(f"[INFO] Notificación NNTP enviada: {response}")
-
-    except Exception as e:
-        print(f"[ERROR] No se pudo notificar NNTP para {user}: {e}")
 
 
-
-
-
-# Clase para manejar los mensajes
 @implementer(smtp.IMessage)
 class FileMessage:
+    """
+    Clase encargada de recibir y guardar los mensaje de correo que lleguen al servidor SMTP.
+
+    Atributos:
+        recipient (str): Dirección de correo del destinatario.
+        mail_storage (str): Directorio de almacenamiento para los correos.
+        lines (list): Lista de líneas del mensaje.
+    """
+
     def __init__(self, recipient, mail_storage):
         self.recipient = recipient
         self.mail_storage = mail_storage
         self.lines = []
 
     def lineReceived(self, line):
+        """
+        Método para recibir una línea del mensaje y definir si necesita ser decodificada.
+        
+        Args:
+            line (bytes/str): Línea del mensaje a evaluar.
+        """
+        # En caso de que sea bytes
         if isinstance(line, bytes):
-            self.lines.append(line.decode('utf-8'))  # Decodificar si es bytes
+            self.lines.append(line.decode('utf-8'))  
         else:
             self.lines.append(line) 
 
 
     def eomReceived(self):
+        """
+        Método para crear el archivo .eml unas vez recibidad todas las líneas del mensaje.
+        
+        Returns:
+            defer.succeed(None): Promesa de que el archivo fue creado exitosamente.
+        
+        """
         recipient_user, recipient_domain = self.recipient.split('@')
         recipient_dir = os.path.join(self.mail_storage, recipient_domain, recipient_user)
-        os.makedirs(recipient_dir, exist_ok=True)
+        os.makedirs(recipient_dir, exist_ok=True) # Se crea el directorio en caso de que no exista
 
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         base_filename = f"mail_{timestamp}"
-        email_filename = f"{base_filename}.eml"  # Guardaremos el correo en formato .eml
+        email_filename = f"{base_filename}.eml" # Se guarda el archivo con extensión .eml
         email_file_path = os.path.join(recipient_dir, email_filename)
 
-        # Juntar todas las líneas en un solo string (mensaje RAW)
+        # Juntar todas las líneas del mensaje en un solo string
         full_message = "\n".join(self.lines)
 
-        # Guardar el mensaje RAW en formato .eml
+        
         with open(email_file_path, 'w', encoding="utf-8") as f:
             f.write(full_message)
         print(f"Mail saved in: {email_file_path}")
 
         
-
         return defer.succeed(None)
 
 
@@ -123,33 +121,89 @@ class FileMessage:
 
 @implementer(smtp.IMessageDelivery)
 class FileMessageDelivery:
+    """
+    Clase encargada de validar los destinatarios y remitentes de cada correo.
+
+    Atributos:
+        allowed_domains (list): Lista de dominios permitidos por el servidor.
+        mail_storage (str): Directorio de almacenamiento para almacenar los correos.
+
+    """
     def __init__(self, allowed_domains, mail_storage):
         self.allowed_domains = allowed_domains
         self.mail_storage = mail_storage
     
     def receivedHeader(self, helo, origin, recipients):
-        return f""
+        """
+        Método para crear el encabezado del correo
+
+        Args:
+            helo (str): Nombre del servidor de origen.
+            origin (str): Dirección de correo del remitente.
+            recipients (list): Lista de destinatarios.
+
+        Returns:
+            str: Encabezado del correo
+        """
+        return f"" # No se agrega el encabezado ya que el mensaje ya viene con el encabezado
     
     def validateFrom(self, helo, origin):
-        return origin # Se acepta cualquier remitente
+        """
+        Método para validar el remitente del correo.
+        
+        Args:
+            helo (str): Nombre del servidor de origen.
+            origin (str): Dirección de correo del remitente.
+        
+        Returns:
+            str: Dirección de correo del remitente.
+        """
+        # En este caso no hay ninguna restricción de remitente
+        return origin 
     
+
     def validateTo(self, user):
-        recipient_domain = user.dest.domain.decode("utf-8")
+        """
+        Método para validar el destinatario del correo.
+
+        Args:
+            user: Dirección de correo del destinatario.
+        
+        Returns:
+            FileMessage: Objeto FileMessage para recibir el mensaje.
+        """
+        recipient_domain = user.dest.domain.decode("utf-8") 
         if recipient_domain in self.allowed_domains:
+            # Se verifica si el dominio el destinatario debe ser aceptado por el servidor
             return lambda: FileMessage(user.dest.local.decode("utf-8") + '@' + recipient_domain, self.mail_storage)
-        raise smtp.SMTPBadRcpt(user)
+        raise smtp.SMTPBadRcpt(user) # Se rechaza el correo indicando que el destinatario no es válido
 
 
-# Clase para el servidor SMTP
+
 class FileSMTPFactory(smtp.SMTPFactory):
+    """
+    Clase para crear el servidor SMTP y generar el protocolo.
 
+    Atributos:
+        delivery: Objeto FileMessageDelivery encargado de validar los destinatarios y remitentes.
+    """
     def __init__(self, allowed_domains, mail_storage):
         self.delivery = FileMessageDelivery(allowed_domains, mail_storage)
 
     def buildProtocol(self, addr):
-        p = smtp.SMTPFactory.buildProtocol(self, addr)
-        p.delivery = self.delivery
-        return p
+        """
+        Método para construir el protocolo del servidor SMTP.
+
+        Args:
+            addr: Dirección del cliente.
+
+        Returns:
+            protocol: Protocolo del servidor SMTP.
+        """
+        protocol = smtp.SMTPFactory.buildProtocol(self, addr)
+        protocol.delivery = self.delivery
+        return protocol
+
 
 # Carga los usuarios al iniciar el servidor
 USERS_FILE = "users.json"
