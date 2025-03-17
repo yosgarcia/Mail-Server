@@ -29,30 +29,6 @@ def parse_arguments():
     return allowed_domains, args.mail_storage, args.port
 
 
-def load_users_from_json(file_path):
-    """
-    Función encargada de leer los usuarios desde un archivo JSON.
-
-    Args:
-        file_path (str): Ruta del archivo JSON.
-    
-    Returns:
-        users (dict): Diccionario con los usuarios.
-
-    """
-    # Valida que el archivo exista
-    if not os.path.exists(file_path):
-        print(f"[ERROR] Users file {file_path} not found")
-        return {}
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            users = json.load(f)
-            return users
-    except Exception as e:
-        print(f"[ERROR] No se pudo cargar el archivo JSON: {e}")
-        return {}
-    
-
 
 
 @implementer(smtp.IMessage)
@@ -205,9 +181,6 @@ class FileSMTPFactory(smtp.SMTPFactory):
         return protocol
 
 
-# Carga los usuarios al iniciar el servidor
-USERS_FILE = "users.json"
-USERS = load_users_from_json(USERS_FILE)
 
 if __name__ == "__main__":
     domains, storage, port = parse_arguments()
