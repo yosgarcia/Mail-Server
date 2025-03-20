@@ -1,4 +1,6 @@
 import csv
+import email
+from email.message import EmailMessage
 import sys
 import re
 import argparse
@@ -104,12 +106,21 @@ def send_mail(smtp_host, smtp_port, sender, recipient, message, subject):
     # Convertir a bytes para SMTP
     msg_data = msg.as_string()
 
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = recipient
+    msg["Subject"] = subject
+    msg['Date'] = email.utils.formatdate(localtime=True)
+    msg['MIME-Version'] = '1.0'
+
+    msg.set_content(message.format(name=recipient))
+
     
     deferred = sendmail(
         smtp_host,
         sender,
         recipient,
-        msg_data.encode("utf-8"),
+        msg,#msg_data.encode("utf-8"),
         port=smtp_port,
         requireAuthentication=False,
         requireTransportSecurity=False  # False ya que no se está usando SSL

@@ -1,8 +1,7 @@
-Hola, {name}, ¿cómo estás?
+Hola, {name} espero que te encuentres bien.
 
-Espero que estes teniendo un gran día.
 
-Recuerda que mañana tenemos reunión con el cliente a las 10:00 am.
+Recuerda que el dia de hoy tenemos la junta con el cliente a las 10:00 am.
 
 Saludos, 
 El equipo
