@@ -1,6 +1,11 @@
 import csv
 import email
+from email import encoders
 from email.message import EmailMessage
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+import mimetypes
+import os
 import sys
 import re
 import argparse
@@ -84,7 +89,7 @@ def handle_send_error(err, recipient):
         print(f"Error with email {recipient}: {err}")
 
 
-def send_mail(smtp_host, smtp_port, sender, recipient, message, subject):
+def send_mail(smtp_host, smtp_port, sender, recipient, message, subject, attachments=None):
     """
     Función para enviar un correo electrónico usando SMTP en el formato MIME.
 
@@ -97,15 +102,6 @@ def send_mail(smtp_host, smtp_port, sender, recipient, message, subject):
         subject (str): Asunto del correo.
     """
 
-    # Mensaje en fromato MIME
-    msg = MIMEText(message, "plain", "utf-8")
-    msg["From"] = sender
-    msg["To"] = recipient
-    msg["Subject"] = subject
-
-    # Convertir a bytes para SMTP
-    msg_data = msg.as_string()
-
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = recipient
@@ -115,6 +111,33 @@ def send_mail(smtp_host, smtp_port, sender, recipient, message, subject):
 
     msg.set_content(message.format(name=recipient))
 
+    if attachments:
+        for filepath in attachments:
+            if not os.path.isfile(filepath):
+                print(f"Attachment {filepath} not found. Skipping.")
+                continue
+            ctype, encoding = mimetypes.guess_type(filepath)
+            if ctype is None or encoding is not None:
+                ctype = "application/octet-stream"
+            maintype, subtype = ctype.split("/", 1)
+            with open(filepath, "rb") as f:
+                file_data = f.read()
+                filename = os.path.basename(filepath)
+                msg.add_attachment(file_data, maintype=maintype, subtype=subtype, filename=filename)
+
+
+    # Convertir a bytes para SMTP
+    '''msg_data = msg.as_string()
+
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = recipient
+    msg["Subject"] = subject
+    msg['Date'] = email.utils.formatdate(localtime=True)
+    msg['MIME-Version'] = '1.0'
+
+    msg.set_content(message.format(name=recipient))
+'''
     
     deferred = sendmail(
         smtp_host,
@@ -131,7 +154,7 @@ def send_mail(smtp_host, smtp_port, sender, recipient, message, subject):
     return deferred
 
 
-def send_emails(smtp_host, smtp_port, csv_file, message_file):
+def send_emails(smtp_host, smtp_port, csv_file, message_file, attachments=None):
     """
     Función para enviar cada una de los correos electrónicos del archivo csv.
 
@@ -159,7 +182,7 @@ def send_emails(smtp_host, smtp_port, csv_file, message_file):
         # de manera que sea personalizado el mensaje
         mensaje_personalizado = change_message(mensaje_template, contacto["name"], contacto["sender_email"], contacto["recipient_email"])
         
-        d = send_mail(smtp_host, smtp_port, contacto["sender_email"], contacto["recipient_email"], mensaje_personalizado, contacto["subject"])
+        d = send_mail(smtp_host, smtp_port, contacto["sender_email"], contacto["recipient_email"], mensaje_personalizado, contacto["subject"], attachements)
         
         deferreds.append(d)
 
@@ -355,7 +378,7 @@ if __name__ == '__main__':
     print(sys.argv)
     if len(sys.argv) == 2 and sys.argv[1] == "-g":
         open_gui()
-    elif len(sys.argv) == 7 and sys.argv[1] != "-g":
+    elif len(sys.argv) >= 7 and sys.argv[1] != "-g":
         if sys.argv[1] != "-h" or sys.argv[3] != "-c" or sys.argv[5] != "-m":
             print("Uso: python smtpclient.py -h <servidor-smtp> -c <archivo-csv> -m <archivo-mensaje>")
             sys.exit(1)
@@ -365,7 +388,11 @@ if __name__ == '__main__':
         csv_file = sys.argv[4]
         message_file = sys.argv[6]
         smtp_port = 2525  
+        attachements = None
 
-        d = send_emails(smtp_host, smtp_port, csv_file, message_file)
+        if len(sys.argv) >= 9 and sys.argv[7] == "-f":
+            attachements = sys.argv[8].split(",")
+
+        d = send_emails(smtp_host, smtp_port, csv_file, message_file, attachements)
         d.addCallback(lambda _: reactor.stop())
         reactor.run()

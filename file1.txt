@@ -1,0 +1,1 @@
+Esto es un archivo de texto de prueba para enviar un correo con un adjunto.

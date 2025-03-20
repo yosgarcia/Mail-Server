@@ -171,7 +171,6 @@ class SimpleMailbox:
                     )'''
                     print(f"Enviando mensaje UID {idx} con el contenido:\n{header_str}\n")
 
-        print(f"RESULTADOS: {results}")
         return iter(results.items())
 
 
@@ -212,11 +211,12 @@ class SimpleMailbox:
 # ----------------------------
 # Implementación del Mensaje IMAP
 # ----------------------------
-
+from email import policy
+from email.parser import BytesParser
 @implementer(imap4.IMessage)
 class SimpleMessage:
     def __init__(self, data, uid):
-        self.email_obj = email.message_from_bytes(data)
+        self.email_obj = email.message_from_bytes(data, policy=policy.default)
         self.raw = data
         self.flags = ['\\Seen']  # Puedes ajustar las banderas como quieras
         self.uid = uid
@@ -239,9 +239,33 @@ class SimpleMessage:
         return headers
 
     def getBodyFile(self):
-        payload = self.email_obj.get_payload(decode=True)
-        print(f"Payload: {payload}")
-        return BytesIO(payload if payload else b'')
+        try:
+            #print(f"DEBUG: Email object: {self.email_obj}")
+            print(f"DEBUG: UID: {self.uid}")
+            print(f"DEBUG: Multipart? {self.email_obj.is_multipart()}")
+            if self.email_obj.is_multipart():
+                # Recorrer todas las partes del mensaje y buscar la de tipo texto plano
+                print(f"AQUIIIIIIIIIII")
+
+                for part in self.email_obj.walk():
+                    content_type = part.get_content_type()
+                    content_disposition = part.get('Content-Disposition', '')
+
+                    # Ignorar los adjuntos
+                    if content_type == 'text/plain' and 'attachment' not in content_disposition:
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            return BytesIO(payload)
+                # Si no hay texto plano, devolver vacío
+                return BytesIO(b'')
+            else:
+                # No es multipart, extraer directamente
+                payload = self.email_obj.get_payload(decode=True)
+                return BytesIO(payload if payload else b'')
+        except Exception as e:
+            print(f"Error in getBodyFile: {e}")
+            return BytesIO(b'')
+
 
     def isMultipart(self):
         return self.email_obj.is_multipart()
@@ -381,8 +405,6 @@ def main():
     portal_inst = portal.Portal(realm)
     portal_inst.registerChecker(checker)
 
-    # Iniciar el servidor IMAP
-    log.startLogging(sys.stdout)
     reactor.listenTCP(port, IMAPFactory(portal_inst))
     reactor.run()
 
