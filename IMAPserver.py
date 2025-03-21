@@ -1,568 +1,785 @@
-import argparse
-import os, sys, time, re, json
-from twisted.internet import reactor, protocol, defer
-from twisted.mail import imap4
-from zope.interface import implementer
-
-from twisted.protocols.basic import LineReceiver
-
-
+import base64
+import os
+import random
 import email
+from io import BytesIO
+from zope.interface import implementer
+from twisted.internet import protocol, reactor
+from twisted.cred import portal, credentials
 from email import policy
+from twisted.mail import imap4
+import argparse
+import json
+import unicodedata
 
 
-def parse_arguments():
+
+
+class MailboxMetadata:
     """
-    Función para leer los argumentos de la línea de comandos.
+    Clase que se encarga de manejar los metadatos del buzón, incluyendo
+    la lista de los mensajes y los UID asignados.
 
-    Returns:
-        mail_storage: Directorio de correos almacenados.
-        port: Puerto a usar.
+    Atributos:
+        messages (list): Lista de mensajes con sus UID.
+        uidvalidity (int): Número aleatorio que representa la validez de los UID.
+        uid_next (int): El siguiente UID que se asignará.
     """
-    parser = argparse.ArgumentParser(description="IMAP Server")
-    parser.add_argument("-s", "--mail-storage", required=True, help="Directory to store emails")
-    parser.add_argument("-p", "--port", type=int, required=True, default=143, help="Port to listen on")
+    def __init__(self):
+        self.messages = []  
+        self.uidvalidity = random.randint(100000, 999999)
+        self.uid_next = 1  
 
-    args = parser.parse_args()
-
-    return args.mail_storage, args.port
-
-
-def load_users_from_json(file_path):
-    """
-    Función para cargar los usuarios desde un archivo JSON.
-
-    Args:  
-        file_path: Ruta del archivo JSON.
-    
-    Returns:
-        users: Diccionario con los usuarios.
-    """
-    if not os.path.exists(file_path):
-        print(f"[ERROR] Users file {file_path} not found")
-        return {}
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            users = json.load(f)
-            return users
-    except Exception as e:
-        print(f"[ERROR] JSON file could not be loaded: {e}")
-        return {}
-    
-
-
-
-class IMAPServer(LineReceiver):
-    """
-    Clase para implementar un servidor IMAP básico.
-    Acepta comandos:
-        - CAPABILITY
-        - LOGIN
-        - SELECT
-        - FETCH
-        - LOGOUT
-        - NOOP
-        - UID
-
-    Atributos:  
-        mail_storage: Directorio de almacenamiento de correos.
-        state: Estado del servidor (NO_AUTENTICADO, AUTENTICADO, SELECCIONADO).
-        username: Nombre de usuario autenticado.
-        user_dir: Directorio del usuario autenticado.
-        mailbox: Diccionario con los mensajes del usuario autenticado.
-    """
-
-    delimiter = b'\r\n'
-
-    def __init__(self, mail_storage):
-        self.mail_storage = mail_storage
-        self.state = 'NOT_AUTHENTICATED'
-        self.username = None
-        self.user_dir = None
-        self.mailbox = None  # Diccionario: clave = número de mensaje, valor = info (path, size, etc.)
-
-    def connectionMade(self):
-        """Método llamado cuando se establece una nueva conexión."""
-        print("[INFO] New connection established from:", self.transport.getPeer())
-        self.sendLine(b'* OK IMAP4rev1 Service Ready')
-
-
-    def load_mailbox(self):
+    def addMessage(self, filename):
         """
-        Recarga la lista de correos desde el disco para incluir nuevos mensajes
-        que hayan llegado.
-        """
-        
-        if not self.user_dir:
-            return
-
-        self.mailbox = {}  # Resetear el diccionario
-        try:
-            files = os.listdir(self.user_dir)
-        except Exception as e:
-            print(f"[ERROR] It could not access to the mailbox: {e}")
-            return
-
-        # Se itera a través de los archivos .eml
-        eml_files = [f for f in files if f.endswith('.eml')]
-        eml_files.sort()
-        
-        for i, filename in enumerate(eml_files, start=1):
-            fullpath = os.path.join(self.user_dir, filename)
-            size = os.path.getsize(fullpath)
-            internal_date = time.strftime('%d-%b-%Y %H:%M:%S +0000', time.gmtime(os.path.getmtime(fullpath)))
-            
-            # Se actualiza el diccionario con la información del mensaje
-            self.mailbox[i] = {
-                'filename': filename,
-                'path': fullpath,
-                'size': size,
-                'flags': [],
-                'internal_date': internal_date
-            }
-
-
-    def lineReceived(self, line):
-        """
-        Función para gestionar los comandos que reciba el servidor IMAP de la conexión
+        Función para añadir un mensaje al buzón.
 
         Args:
-            line: Línea recibida del cliente.
-        """
+            filename (str): Nombre del archivo del mensaje.
         
-        try:
-            line = line.decode('utf-8')
-        except UnicodeDecodeError:
-            self.sendLine(b'* BAD Invalid Encoding')
-            return
-
-        # Se espera que la línea tenga el formato: <tag> <COMANDO> [argumentos...]
-        print(f"[DEBUG] Command received: {line}")
-        parts = line.split()
-        if not parts:
-            return
-        tag = parts[0]
-        if len(parts) < 2:
-            self.sendLine((tag + " BAD Commans are missing").encode())
-            return
-
-        command = parts[1].upper()
-        args = parts[2:]
-
-        if command == 'CAPABILITY':
-            self.cmd_CAPABILITY(tag, args)
-        elif command == 'LOGIN':
-            self.cmd_LOGIN(tag, args)
-        elif command == 'SELECT':
-            self.cmd_SELECT(tag, args)
-        elif command == 'FETCH':
-            self.cmd_FETCH(tag, args)
-        elif command == 'UID':
-            if len(args) < 2 or args[0].upper() != 'FETCH':
-                self.sendLine((tag + " BAD Invalid UID Command").encode())
-            else:
-                self.cmd_UID_FETCH(tag, args[1:])
-        elif command == 'LOGOUT':
-            self.cmd_LOGOUT(tag, args)
-        elif command == 'NOOP':
-            self.cmd_NOOP(tag, args) 
-        else:
-            self.sendLine((tag + " BAD Unknown command" + command).encode())
-
-
-    def parse_uid_range(self, uid_range):
+        Returns:
+            int: UID asignado al mensaje.
         """
-        Función para parsear el rango de UIDs y convertirlo en una lista de UIDs.
-        Si el rango tiene el formato "1:*" o "*", se considera como todos los UIDs.
+        # Asignar un UID único a cada mensaje
+        uid = self.uid_next
+        self.messages.append({'uid': uid, 'filename': filename})
+        self.uid_next += 1
+        return uid
+
+    def getMessageByUid(self, uid):
+        """
+        Función para obtener el nombre del archivo de un mensaje a partir de su UID.
 
         Args:
-            uid_range: Rango de UIDs.
+            uid (int): UID del mensaje.
 
         Returns:
-            uids: Lista de UIDs.
+            str: Nombre del archivo del mensaje.
         """
-        uids = []
+        for message in self.messages:
+            if message['uid'] == uid:
+                return message['filename']
+        return None
+
+    def getMessageCount(self):
+        """
+        Función para obtener el número de mensajes en el buzón.
+
+        Returns:
+            int: Número de mensajes.
+        """
+        return len(self.messages)
+
+    def getUIDValidity(self):
+        """
+        Obtiene el UIDVALIDITY del buzón.
+
+        Returns:
+            int: Valor UIDVALIDITY.
+        """
+        return self.uidvalidity
+
+    def getUIDNext(self):
+        """
+        Obtiene el siguiente UID disponible.
+
+        Returns:
+            int: Valor UIDNEXT.
+        """
+        return self.uid_next
+
+
+
+@implementer(imap4.IMailbox)
+class SimpleMailbox:
+    """
+    Clase que implementa un buzón IMAP que se encargada de manejar los correos en
+    el directorio del usuario.
+
+    Atributos:
+        path (str): Directorio del usuario.
+        metadata (MailboxMetadata): Metadatos del buzón.
+        listeners (list): Lista de listeners para eventos en el buzón.
+    """
+    def __init__(self, path):
+        self.path = path
+        self.metadata = MailboxMetadata()
+        self.listeners = []
+        self.deleted_messages = set() 
+        # Cargar los mensajes directamente del directorio
+        self.loadMessages()
+
+    def loadMessages(self):
+        """
+        Carga los correos .eml directamente desde el directorio del usuario.
         
-        # Caso con * (todos los UIDs)
-        if '*' in uid_range:
-            if uid_range == "*":
-                return list(self.mailbox.keys())
+        """
+        for f in os.listdir(self.path):
+            if f.endswith('.eml'):
+                uid = self.metadata.addMessage(f)
+        print(f"Mails loaded: {self.metadata.messages}")
+
+    def getFlags(self):
+        """
+        Define las banderas IMAP que va a soportar el buzón.
+
+        Returns:
+            list: Lista de banderas.
+        """
+        return ['\\Seen', '\\Deleted', '\\Flagged']
+
+    def getHierarchicalDelimiter(self):
+        """
+        Define el delimitador jerárquico del buzón.
+
+        Returns:
+            str: Delimitador que en este caso es '/'.
+        """
+        return '/'
+
+    def getUIDValidity(self):
+        """
+        Devuelve el UIDVALIDITY del buzón.
+
+        Returns:
+            int: Valor UIDVALIDITY.
+        """
+        return self.metadata.getUIDValidity()
+
+    def getMessageCount(self):
+        """
+        Devuelve el número total de mensajes en el buzón.
+
+        Returns:
+            int: Número de mensajes.
+        """
+        return self.metadata.getMessageCount()
+
+    def getRecentCount(self):
+        """
+        Devuelve el número de mensajes recientes.
+
+        Returns:
+            int: Siempre retorna 0 ya que no se tiene implementa una lógica para los mensajes
+                recientes.
+        """
+        return 0
+
+    def isWriteable(self):
+        """
+        Indica si el buzón es escribible.
+
+        Returns:
+            bool: True, ya que permite agregar mensajes nuevos.
+        """
+        return True
+
+    def getUIDNext(self):
+        """
+        Obtiene el siguiente UID disponible.
+
+        Returns:
+            int: Valor UIDNEXT.
+        """
+        return self.metadata.getUIDNext()
+
+    def _seqToMessages(self, messageSet):
+        """
+        Convierte un conjunto de secuencias (MessageSet) en un diccionario de mensajes válidos.
+
+        Args:
+            messageSet (MessageSet): Conjunto de secuencias.
+
+        Returns:
+            dict: Mapeo de número de mensaje a filename.
+        """
+        seq_map = {}
+        for msg_num in messageSet:
+            if msg_num <= 0 or msg_num > len(self.metadata.messages):
+                continue
+            seq_map[msg_num] = self.metadata.messages[msg_num - 1]['filename']
+        return seq_map
+
+    def fetch(self, msgnum, uid=False):
+        """
+        Método encargado de retornar los mensajes solicitados por el cliente de correo.
+
+        Args:
+            msgnum: Secuencia o cadena representando los mensajes solicitados.
+            uid (bool): Si True, usa UID en lugar de número de secuencia.
+
+        Returns:
+            iterator: Iterador con los mensajes encontrados.
+        """
+        if isinstance(msgnum, imap4.MessageSet):
+            # Para evitar errores, se asegura que tenga el atributo `last`
+            if hasattr(msgnum, 'last'):
+                msgnum.last = self.metadata.getMessageCount()
             else:
-                # Si es algo como "1:*", lo convertimos en un rango "1:último UID"
-                parts = uid_range.split(':')
-                if len(parts) == 2 and parts[1] == "*":
-                    start = int(parts[0])
-                    end = len(self.mailbox) 
-                    uids = list(range(start, end + 1))
-        
-        # Caso con rango específico "start:end"
-        elif ':' in uid_range:
-            start, end = uid_range.split(':')
-            start = int(start)
-            end = int(end)
-            
-            if start > end:
-                start, end = end, start 
-
-            uids = list(range(start, end + 1))
-        
-        # Caso de un solo UID
-        else:
+                # Si no es callable, intentamos establecerlo manualmente (por ejemplo, en el atributo _last)
+                msgnum._last = self.metadata.getMessageCount() if not uid else (self.metadata.getUIDNext() - 1)
             try:
-                uids = [int(uid_range)]
-            except ValueError:
-                return None
-
-        return uids
-
-
-
-    def cmd_UID_FETCH(self, tag, args):
-        """
-        Función para manejar el comando UID FETCH. 
-        Se espera que se envíe un rango de UID y una solicitud compuesta,
-        por ejemplo:
-        UID FETCH 1:3 (UID RFC822.SIZE FLAGS BODY.PEEK[HEADER.FIELDS 
-        (From To Cc Bcc Subject Date Message-ID Priority X-Priority References 
-        Newsgroups In-Reply-To Content-Type Reply-To)])
-
-        Args:
-            tag: Etiqueta del comando.
-            args: Lista de argumentos.
-
-        """
-
-        self.load_mailbox()  # Actualizar antes de responder
-
-        if len(args) < 2:
-            self.sendLine(f"{tag} BAD UID FETCH requires UID and aditional data".encode())
-            return
-
-        uid_range = args[0]
-        data_item_full = " ".join(args[1:]).strip()
-        
-        # Parseamos los UIDs
-        uids = self.parse_uid_range(uid_range)
-        if not uids:
-            self.sendLine(f"{tag} BAD Invalid range of UID".encode())
-            return
-
-        # Procesamos la solicitud del cliente compuesta con una expresión regular
-        pattern = r"^\(UID\s+RFC822\.SIZE\s+FLAGS\s+BODY\.PEEK\[HEADER\.FIELDS\s+\((?P<fields>.+)\)\]\)$"
-        m = re.match(pattern, data_item_full, re.IGNORECASE)
-
-        if m:
-            fields_str = m.group("fields")
-            fields = fields_str.split() 
-            
-            for uid in uids:
-                msg = self.mailbox.get(uid)
-                if not msg:
-                    self.sendLine(f'* {uid} NO Message does not exist'.encode())
-                    continue
-                try:
-                    with open(msg['path'], 'rb') as f:
-                        content = f.read()
-
-                    msg_obj = email.message_from_bytes(content, policy=policy.default)
-                except Exception:
-                    self.sendLine(f"{tag} NO Error reading message".encode())
-                    return
-
-                
-                flags = msg.get('flags', [])
-                flags_str = ' '.join(flags) if flags else []#'\\Seen'
-                
-                
-                header_fields = []
-                for field in fields:
-                    header_value = msg_obj.get(field, '')
-                    if header_value:  # Solo añadimos los campos que realmente existen
-                        header_fields.append(f"{field}: {header_value}")
-                
-                
-                if not header_fields:
-                    self.sendLine(f"{tag} NO Requested headings not found".encode())
-                    return
-
-                headers_str = "\r\n".join(header_fields)
-                
-                literal = f'{{{len(headers_str.encode())}}}'
-                self.sendLine(f'* {uid} FETCH (UID {uid} RFC822.SIZE {len(content)} FLAGS ({flags_str}) BODY.PEEK[HEADER.FIELDS ({", ".join(fields)})] {literal})'.encode())
-                self.transport.write(headers_str.encode() + b'\r\n')
-                self.sendLine(f"{tag} OK UID FETCH completed".encode())
-
-
-                """body_literal = f'{{{len(content)}}}'
-                self.sendLine(f'* {uid} FETCH (BODY[] {body_literal})'.encode())
-                self.transport.write(content + b'\r\n')"""
-
-            self.sendLine(f"{tag} OK UID FETCH completed".encode())
-            return
-
-        
-        elif data_item_full.upper() == "(FLAGS)":
-            for uid in uids:
-                msg = self.mailbox.get(uid)
-                if msg:
-                    flags = msg.get('flags', [])
-                    flags_str = ' '.join(flags) if flags else '\\Seen'
-                    self.sendLine(f'* {uid} FETCH (UID {uid} FLAGS ({flags_str}))'.encode())
-                else:
-                    self.sendLine(f'* {uid} NO Message does not exist'.encode())
-            self.sendLine(f"{tag} OK UID FETCH completed".encode())
-            return
-
-        elif data_item_full.upper() == "(BODY[])":
-            for uid in uids:
-                msg = self.mailbox.get(uid)
-                if not msg:
-                    self.sendLine(f'* {uid} NO Message does not exist'.encode())
-                    continue
-                try:
-                    with open(msg['path'], 'rb') as f:
-                        content = f.read()
-                except Exception:
-                    self.sendLine(f"{tag} NO Error reading message".encode())
-                    return
-
-                literal = f'{{{len(content)}}}'
-                flags = msg.get('flags', [])
-                flags_str = ' '.join(flags) if flags else '\\Seen'
-                self.sendLine(f'* {uid} FETCH (UID {uid} FLAGS ({flags_str}) BODY[] {literal})'.encode())
-                self.transport.write(content + b'\r\n')
-
-            self.sendLine(f"{tag} OK UID FETCH completed".encode())
-            return
-
-        else:
-            self.sendLine(f"{tag} BAD It only admits (FLAGS), (BODY[]) or compound request (UID RFC822.SIZE FLAGS BODY.PEEK[HEADER.FIELDS (...)])".encode())
-            return
-        
-    
-    def cmd_NOOP(self, tag, args):
-        """
-        Función para responder al comando NOOP.
-        Se devuele un mensaje de éxito OK
-        """
-        self.sendLine((tag + " OK NOOP completed").encode())
-
-    def cmd_CAPABILITY(self, tag, args):
-        """
-        Función para responder al comando CAPABILITY.
-        """
-        self.sendLine(b'* CAPABILITY IMAP4rev1 LITERAL+')
-        self.sendLine((tag + " OK CAPABILITY completed").encode())
-
-    def cmd_LOGIN(self, tag, args):
-        """
-        Función para manejar el comando LOGIN.
-        Aqui se maneja el inicio de sesión de un usuario.
-        
-        Args:
-            tag: Etiqueta del comando.
-            args: Lista de argumentos.
-        """
-        if len(args) < 2:
-            self.sendLine((tag + " BAD LOGIN requires user and password").encode())
-            return
-
-        username = args[0].strip('"')
-        password = args[1].strip('"')
-        
-        if '@' not in username:
-            self.sendLine((tag + " NO Invalida user format").encode())
-            return
-        user, domain = username.split('@', 1)
-        user_dir = os.path.join(self.mail_storage, domain, user)
-
-        if username not in USERS:
-            self.sendLine((tag + " NO User not found").encode())
-            return
-
-        if USERS[username]["password"] != password:
-            self.sendLine((tag + " NO Wrong password").encode())
-            return
-
-        print(f"[INFO] Succesful login for: {username}")
-
-        self.username = username
-        self.user_dir = user_dir
-        self.state = 'AUTHENTICATED'
-        self.sendLine((tag + " OK LOGIN completed").encode())
-
-    def cmd_SELECT(self, tag, args):
-        """
-        Función para manejar el comando SELECT.
-        
-        Args:
-            tag: Etiqueta del comando.
-            args: Lista de argumentos.
-
-        """
-        # Solo se admite SELECT INBOX
-        if self.state != 'AUTHENTICATED':
-            self.sendLine((tag + " NO No authenticated").encode())
-            return
-
-        if len(args) < 1:
-            self.sendLine((tag + " NO A mailbox is expected").encode())
-            return
-
-        # Eliminar comillas en torno al nombre del buzón
-        mailbox_name = args[0].strip('"') 
-        
-        if mailbox_name.upper() != 'INBOX':
-            self.sendLine((tag + " NO INBOX is only allowed").encode())
-            return
-
-        
-        self.mailbox = {}
-        try:
-            files = os.listdir(self.user_dir)
-        except Exception as e:
-            self.sendLine((tag + " NO Error accediendo al buzón").encode())
-            return
-
-        # Se filtran los archivos .eml
-        eml_files = [f for f in files if f.endswith('.eml')]
-        eml_files.sort()  # Ordenamos (por ejemplo alfabéticamente)
-        for i, filename in enumerate(eml_files, start=1):
-            fullpath = os.path.join(self.user_dir, filename)
-            size = os.path.getsize(fullpath)
-            # Se utiliza la fecha de modificación como fecha interna (internal date)
-            internal_date = time.strftime('%d-%b-%Y %H:%M:%S +0000', time.gmtime(os.path.getmtime(fullpath)))
-            self.mailbox[i] = {'filename': filename,
-                               'path': fullpath,
-                               'size': size,
-                               'flags': [],
-                               'internal_date': internal_date}
-        
-        message_count = len(self.mailbox)
-        self.state = 'SELECTED'
-        
-        self.sendLine((f'* {message_count} EXISTS').encode())
-        self.sendLine(b'* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)')
-        self.sendLine((tag + " OK [READ-WRITE] SELECT completed").encode())
-
-    def cmd_FETCH(self, tag, args):
-        """
-        Función para manejar el comando FETCH.
-        Se espera que se envíe un número de mensaje y la solicitud de datos.
-        Por ejemplo: FETCH 1 (BODY[])
-
-        Args:
-            tag: Etiqueta del comando.
-            args: Lista de argumentos.
-        """
-
-        self.load_mailbox() 
-
-        if self.state != 'SELECTED':
-            self.sendLine((tag + " NO Mailbox not selected").encode())
-            return
-        
-        if len(args) < 2:
-            self.sendLine((tag + " BAD FETCH requires number of messages and data item").encode())
-            return
-        
-        msg_set = args[0]
-        data_item = args[1]
-        
-        
-        if data_item.upper() not in ['(BODY[])', 'BODY[]']:
-            self.sendLine((tag + " BAD BODY[] only allowed").encode())
-            return
-
-        # rango de mensajes
-        if msg_set == "1:*":
-            uids = list(self.mailbox.keys())
-        else:
-            # Analizar un único número de mensaje
-            try:
-                msg_nums = [int(num) for num in msg_set.split(",")]
-            except ValueError:
-                self.sendLine((tag + " BAD Invalid message number").encode())
-                return
-            
-            uids = []
-            for num in msg_nums:
-                if num in self.mailbox:
-                    uids.append(num)
-            
-            if not uids:
-                self.sendLine((tag + " NO There are no messages for the indicated numbers").encode())
-                return
-
-        # Obtener los mensajes solicitados
-        for uid in uids:
-            msg = self.mailbox[uid]
-            try:
-                with open(msg['path'], 'rb') as f:
-                    content = f.read()
+                msgnums = list(msgnum)
             except Exception as e:
-                self.sendLine((tag + " NO Error reading message").encode())
-                return
-            
-            
-            literal = b'{%d+}' % (len(content),)
-            self.sendLine((f'* {uid} FETCH (BODY[] {literal.decode()})').encode())
-            self.transport.write(content + b'\r\n')
+                print(f"Error converting MessageSet to List: {e}")
+                return iter({})
+        else:
+            # Si msgnum es una cadena por ejemplo "1:*" o "1:5"
+            msgnums = []
+            for range_str in msgnum.split(','):
+                if ':' in range_str:
+                    start, end = range_str.split(':')
+                    start = int(start)
+                    if end == '*':
+                        end = self.metadata.getMessageCount()
+                    else:
+                        end = int(end)
+                    msgnums.extend(range(start, end + 1))
+                else:
+                    msgnums.append(int(range_str))
+
+        results = {}
+
+        if uid:
+            for m in msgnums:
+                filename = self.metadata.getMessageByUid(m)
+                if filename:
+                    file_path = os.path.join(self.path, filename)
+                    with open(file_path, 'rb') as f:
+                        data = f.read() # Se obtiene el contenido del correo
+
+                    message = SimpleMessage(data, m)
+                    headers = message.getHeaders(False, 'From', 'To', 'Subject', 'Date', 'Message-ID', 'Content-Type')
+                    header_str = "\r\n".join([f"{key}: {val}" for key, val in headers.items()])
+                    size = message.getSize()
+                    flags = message.getFlags()
+
+                    sub_parts = message.getSubPart()
+
+                    if sub_parts:
+                        for part in sub_parts:
+                            part_content = part['content']
+                            part_filename = part['filename']
+                            part_content_type = part['content_type']
+
+                            # Aquí enviarías el adjunto como una respuesta adicional si lo deseas
+                            # Puedes también agregar la codificación base64 para los adjuntos.
+                            if part_filename:
+                                encoded_content = base64.b64encode(part_content).decode('utf-8')
+                                results[m] = f"Attachment: {part_filename}, Content-Type: {part_content_type}, Content: {encoded_content}"
+
+                    if isinstance(flags, str):
+                        flags = [flags] 
+                    '''results[m] = (
+                        f"* {m} FETCH (UID {m} RFC822.SIZE {size} FLAGS ({' '.join(flags)}) "
+                        f"BODY.PEEK[HEADER.FIELDS (From To Subject Date Message-ID)] {{{size}}}\r\n{header_str})"
+                    )'''
+                    results[m] = message
+                    print(f"Sending message UID {m} with content:\n{message.raw}\n")
+                else:
+                    print(f"Message with UID {m} not found.")
+        else:
+            for idx, message_info in enumerate(self.metadata.messages, start=1):
+                if idx in msgnums:
+                    filename = message_info['filename']
+                    file_path = os.path.join(self.path, filename)
+                    with open(file_path, 'rb') as f:
+                        data = f.read()
+
+                    message = SimpleMessage(data, idx)
+                    headers = message.getHeaders(False, 'From', 'To', 'Subject', 'Date', 'Message-ID')
+                    header_str = "\r\n".join([f"{key}: {val}" for key, val in headers.items()])
+                    size = message.getSize()
+                    flags = message.getFlags() 
+
+                    if isinstance(flags, str):
+                        flags = [flags]  
+                    '''results[idx] = (
+                        f"* {idx} FETCH (UID {idx} RFC822.SIZE {size} FLAGS ({' '.join(flags)}) "
+                        f"BODY.PEEK[HEADER.FIELDS (From To Subject Date Message-ID)] {{{size}}}\r\n{header_str})"
+                    )'''
+
+                    sub_parts = message.getSubParts()  # Obtener partes adicionales (como los adjuntos)
+
+                    # Aquí puedes incluir los adjuntos
+                    if sub_parts:
+                        for part in sub_parts:
+                            part_content = part['content']
+                            part_filename = part['filename']
+                            part_content_type = part['content_type']
+
+                            # Puedes agregar los adjuntos como una respuesta si lo deseas
+                            if part_filename:
+                                encoded_content = base64.b64encode(part_content).decode('utf-8')
+                                results[idx] = f"Attachment: {part_filename}, Content-Type: {part_content_type}, Content: {encoded_content}"
+
+                    print(f"Sending message UID {idx} with content:\n{message.raw}\n")
+
+        return iter(results.items())
 
 
-        self.sendLine((tag + " OK FETCH completed").encode())
-
-        # Se elimina el mensaje del disco
-        '''try:
-            os.remove(msg['path'])
-        except Exception as e:
-            pass
-
-        # Se elimina el mensaje del buzón en memoria
-        del self.mailbox[msg_num]'''
-        #self.sendLine((tag + " OK FETCH completado").encode())
-
-    def cmd_LOGOUT(self, tag, args):
+    def addListener(self, listener):
         """
-        Función para manejar el comando LOGOUT.
-        Se cierra la conexión con el cliente.
+        Agrega un listener al buzón.
 
         Args:
-            tag: Etiqueta del comando.
-            args: Lista de argumentos.
-        
+            listener: Listener que se quiere agregar.
         """
-        self.sendLine(b'* BYE IMAP4rev1 Server closing session')
-        self.sendLine((tag + " OK LOGOUT completed").encode())
-        self.transport.loseConnection()
+        self.listeners.append(listener)
 
+    def removeListener(self, listener):
+        """
+        Elimina un listener del buzón.
+
+        Args:
+            listener: Listener a eliminar.
+        """
+        self.listeners.remove(listener)
+
+    def expunge(self):
+        """
+        Elimina permanentemente todos los mensajes marcados como eliminados (\Deleted).
+
+        Returns:
+            str: Mensaje de confirmación.
+        """
+        for msg_uid in self.deleted_messages:
+            print(f"Expunging message {msg_uid} from the server.")
+            filename = self.metadata.getMessageByUid(msg_uid, None)
+            if filename:
+                file_path = os.path.join(self.path, filename)
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        print(f"Deleted message with UID {msg_uid} at {file_path}")
+                    else:
+                        print(f"File for message UID {msg_uid} not found: {file_path}")
+                except Exception as e:
+                    print(f"Error deleting message {msg_uid}: {e}")
+
+        self.deleted_messages.clear()
+
+        return "OK EXPUNGE completed"
+    
+    def store(self, messages, flags, mode, uid):
+        """
+        Método dummy para almacenar banderas y no realiza cambios reales.
+
+        Args:
+            messages: Mensajes afectados.
+            flags: Banderas a aplicar.
+            mode: Modo de aplicación.
+            uid: Si se aplica por UID.
+        Returns:
+            dict: Diccionario vacío.
+        """
+        return {}
+
+    def addMessage(self, message, flags=None, date=None):
+        """
+        Añade un nuevo mensaje al buzón.
+
+        Args:
+            message: Contenido del mensaje.
+            flags: Lista de banderas.
+            date: Fecha del mensaje.
+
+        Returns:
+            tuple: Número total de mensajes, nombre del archivo, UID asignado al mensaje.
+        """
+        filename = f"mail_{random.randint(1000,9999)}.eml"
+        filepath = os.path.join(self.path, filename)
+
+        with open(filepath, 'wb') as f:
+            f.write(message.getvalue())
+        uid = self.metadata.addMessage(filename)
+
+        return len(self.metadata.messages), filename, uid
+    
+
+    def getMessage(self, uid):
+        """
+        Obtiene un mensaje específico según UID.
+
+        Args:
+            uid (int): UID del mensaje solicitado.
+
+        Returns:
+            SimpleMessage: Objeto SimpleMessage correspondiente al UID de parámetro.
+        """
+        filename = self.metadata.getMessageByUid(uid)
+        if filename is None:
+            return None
+        filepath = os.path.join(self.path, filename)
+        with open(filepath, 'rb') as f:
+            raw_data = f.read()
+        return SimpleMessage(raw_data, uid)
+
+
+
+
+
+
+@implementer(imap4.IMessage)
+class SimpleMessage:
+    """
+    Clase que representa un mensaje IMAP de correo,
+    parseado a partir del archivo .eml.
+
+    Atributos:
+        email_obj (email.message.Message): Objeto de mensaje de la librería email.
+        raw (bytes): Contenido del mensaje en bytes.
+        flags (list): Lista de banderas.
+        uid (int): UID del mensaje.
+    """
+    def __init__(self, data, uid):
+        self.email_obj = email.message_from_bytes(data)
+        self.raw = data
+        self.flags = ['\\Seen'] 
+        self.uid = uid
+
+
+    def getHeaders(self, negate, *names):
+        """
+        Función que retorna los headers del correo
+
+        Args:
+            negate (bool): En caso de que sea True, devuelve todos los headers excepto los especificados.
+            names (str): Nombres de los headers a incluir o excluir.
+
+        Returns:
+            dict: Diccionario con los headers seleccionados.
+        """
+        headers = {}
+        for key, val in self.email_obj.items():
+            if (key.lower() in [n.lower() for n in names] and not negate) or (negate and key.lower() not in [n.lower() for n in names]):
+                headers[key] = val
+
+        if 'Content-Type' in headers:
+            content_type = headers['Content-Type']
+            if 'charset' not in content_type:
+                headers['Content-Type'] = content_type + "; charset=UTF-8"
+        
+        if 'Content-Transfer-Encoding' not in headers:
+            headers['Content-Transfer-Encoding'] = 'base64'  
+
+        return headers
+
+    def getBodyFile(self):
+        """
+        Extrae el cuerpo del correo como un objeto BytesIO.
+
+        Returns:
+            BytesIO: Contenido del cuerpo en formato bytes.
+        """
+        try:
+            # En caso que sea un correo con un archivo adjunto
+            if self.email_obj.is_multipart():
+                # Recorrer todas las partes del mensaje y buscar la de tipo texto plano
+                for part in self.email_obj.walk():
+                    content_type = part.get_content_type()
+                    content_disposition = part.get('Content-Disposition', '')
+
+                    # Ignorar los adjuntos
+                    if content_type == 'text/plain' and 'attachment' not in content_disposition:
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            return BytesIO(payload)
+                return BytesIO(b'')
+            else:
+                # Se extrae directamente
+                payload = self.email_obj.get_payload(decode=True)
+                return BytesIO(payload if payload else b'')
+        except Exception as e:
+            print(f"Error in getBodyFile: {e}")
+            return BytesIO(b'')
+
+
+    def getSubPart(self):
+        """
+        Esta función devuelve una subparte específica del mensaje 
+        en caso de que sea multipart.
+
+        Args:
+            part (int): Índice de la subparte.
+
+        Returns:
+            BytesIO o None: Subparte en formato bytes, o None si no existe.
+        """
+        # Si el mensaje es multipart, devolver todas las partes, incluidas las de adjunto
+        if self.email_obj.is_multipart():
+            sub_parts = []
+            for part in self.email_obj.walk():
+                content_disposition = part.get('Content-Disposition', '')
+                content_type = part.get_content_type()
+                payload = part.get_payload(decode=True) or b''
+                
+                # Si es un adjunto, agregamos la parte
+                if 'attachment' in content_disposition or content_type.startswith('application/'):
+                    filename = part.get_filename()
+                    sub_parts.append({
+                        'filename': filename,
+                        'content': payload,
+                        'content_type': content_type
+                    })
+                # Para partes de texto, agregar también
+                if content_type == 'text/plain':
+                    sub_parts.append({
+                        'filename': None,
+                        'content': payload,
+                        'content_type': content_type
+                    })
+            return sub_parts
+        else:
+            # Si no es multipart, solo devolver el contenido
+            return [{
+                'filename': None,
+                'content': self.email_obj.get_payload(decode=True) or b'',
+                'content_type': self.email_obj.get_content_type()
+            }]
+
+
+    def isMultipart(self):
+        """
+        Indica si el mensaje es multipart.
+
+        Returns:
+            bool: True si es multipart, False si no.
+        """
+        return self.email_obj.is_multipart()
+    
+
+    def getFlags(self):
+        """
+        Retorna la lista de banderas actuales del mensaje.
+
+        Returns:
+            list: Lista de banderas IMAP.
+        """
+        return self.flags
+    
+    def getUID(self):
+        """
+        Retorna el UID del mensaje.
+
+        Returns:
+            int: UID del mensaje.
+        """
+        return self.uid
+    
+    def getSize(self):
+        """
+        Retorna el tamaño total del mensaje.
+
+        Returns:
+            int: Tamaño en bytes.
+        """
+        return len(self.raw)
+
+
+
+
+
+@implementer(imap4.IAccount)
+class SimpleAccount:
+    """
+    Clase que representa una cuenta de usuario IMAP.
+
+    Atributos:
+        user_path (str): Ruta al directorio del usuario 
+        donde se almacenan sus correos.
+        metadata (MailboxMetadata): Metadatos del buzón.
+    """
+    def __init__(self, user_path):
+        self.user_path = user_path
+        self.metadata = MailboxMetadata()
+        self.load_messages()
+
+    def load_messages(self):
+        """
+        Carga los correos directamente desde el directorio del usuario.
+        Lee todos los archivos .eml y los indexa con un UID.
+        """
+        self.metadata.messages = [{'uid': i + 1, 'filename': f} for i, f in enumerate(os.listdir(self.user_path)) if f.endswith('.eml')]
+        print(f"Messages loaded for account: {self.metadata.messages}")
+
+    def listMailboxes(self, ref, wildcard):
+        """
+        Lista los buzones disponibles. Solo soporta INBOX para este caso.
+
+        Returns:
+            generator: Yields una tupla con el nombre y objeto del buzón.
+        """
+        yield 'INBOX', self.select('INBOX')
+
+
+    def select(self, path, rw=False):
+        """
+        Selecciona un buzón específico
+
+        Args:
+            path (str): Nombre del buzón.
+
+        Returns:
+            SimpleMailbox: Instancia del buzón seleccionado.
+        """
+        if path != 'INBOX':
+            raise KeyError("INBOX valid only.")
+        return SimpleMailbox(self.user_path)
+
+    def isSubscribed(self, mailbox_name):
+        # En este servidor no se manejan las suscripciones
+        return True  
+    
+    def sanitizeFolderName(name):
+        # Limpia eñ nombre del buzón
+        return unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode('ascii')
+
+    def create(self, path):
+        # No está implementado que se pueda crear nuevos buzones
+        clean_path = self.sanitizeFolderName(path)
+        raise imap4.MailboxException(f"New mailbox creation not suported: {clean_path}")
+
+
+
+@implementer(portal.IRealm)
+class SimpleRealm:
+    """
+    Realm para el portal de autenticación IMAP.
+
+    Atributos:
+        base_dir (str): Directorio base donde están los correos organizados por dominio y usuario.
+    """
+    def __init__(self, base_dir):
+        self.base_dir = base_dir
+
+    def requestAvatar(self, avatarId, mind, *interfaces):
+        """
+        Proporciona la cuenta correspondiente para el usuario que se 
+        autentique.
+
+        Args:
+            avatarId (str): ID del avatar que vendría siendo el nombre de usuario.
+            interfaces: Interfaces solicitadas.
+
+        Returns:
+            tuple: (interfaz, instancia de SimpleAccount, logout callable).
+
+        """
+        if imap4.IAccount not in interfaces:
+            raise NotImplementedError("It's only admitted imap4.IAccount")
+        username = avatarId
+        local_part, domain = username.split('@')
+        user_dir = os.path.join(self.base_dir, domain, local_part)
+        if not os.path.exists(user_dir):
+            raise KeyError("User not found.")
+        return imap4.IAccount, SimpleAccount(user_dir), lambda: None
+
+
+
+
+class SimplePasswordChecker:
+    """
+    Implementación del validador de credenciales que valida 
+    usuario y contraseña desde un archivo JSON.
+
+    Atributos:
+        users (dict): Diccionario con usuarios y contraseñas.
+    """
+    credentialInterfaces = [credentials.IUsernamePassword]
+
+    def __init__(self, users_file):
+        self.users = self.load_users(users_file)
+
+    def load_users(self, users_file):
+        """
+        Carga los usuarios desde el archivo JSON de usuarios.
+
+        Args:
+            users_file (str): Ruta del archivo JSON.
+
+        Returns:
+            dict: Usuarios y contraseñas.
+        """
+        with open(users_file, 'r') as f:
+            return json.load(f) 
+
+    def requestAvatarId(self, credentials):
+        """
+        Función que verifica si el usuario y contraseña ingresados son válidos
+
+        Args:
+            credentials (IUsernamePassword): Credenciales del cliente.
+
+        Returns:
+            str: Nombre de usuario validado.
+        """
+        username = credentials.username.decode('utf-8') if isinstance(credentials.username, bytes) else credentials.username
+        password = credentials.password.decode('utf-8') if isinstance(credentials.password, bytes) else credentials.password
+
+        if username not in self.users:
+            raise KeyError("User not found.")
+        if self.users[username]['password'] != password:
+            raise ValueError("Invalid password.")
+        return username
+
+
+
+
+class IMAPServerProtocol(imap4.IMAP4Server):
+    """
+    Protocolo IMAP que se encarga de mandar y recibir la comunicación
+    con el cliente de correos.
+    """
+    def lineReceived(self, line):
+
+        print("CLIENT:", line)
+        imap4.IMAP4Server.lineReceived(self, line)
+
+    def sendLine(self, line):
+        imap4.IMAP4Server.sendLine(self, line)
+        print("SERVER:", line)
 
 class IMAPFactory(protocol.Factory):
     """
-    Clase para crear instancias de IMAP Server.
+    Clase para la fábrica para construir instancias del protocolo IMAP.
 
     Atributos:
-        mail_storage: Directorio de almacenamiento de correo
+        portal (Portal): Portal de autenticación.
     """
-    def __init__(self, mail_storage):
-        self.mail_storage = mail_storage
+
+    def __init__(self, portal):
+        self.portal = portal
 
     def buildProtocol(self, addr):
-        """
-        Función para construir un protocolo IMAP.
-        """
-        return IMAPServer(self.mail_storage)
+        proto = IMAPServerProtocol()
+        proto.portal = self.portal
+        return proto
 
 
-# Cargar los usuarios desde el archivo JSON
-USERS_FILE = "users.json"
-USERS = load_users_from_json(USERS_FILE)
 
-if __name__ == '__main__':
-    mail_storage, port = parse_arguments()
 
-    factory = IMAPFactory(mail_storage)
-    print(f"[INFO] Running IMAP server in port: {port} with storage in {mail_storage}")
-    reactor.listenTCP(port, factory)
+def main():
+    parser = argparse.ArgumentParser(description="Servidor IMAP simple")
+    parser.add_argument('-s', '--storage', help="Directorio de almacenamiento de correos", required=True)
+    parser.add_argument('-p', '--port', type=int, help="Puerto para el servidor IMAP", required=True)
+    args = parser.parse_args()
+
+    data_dir = args.storage
+    port = args.port
+
+    # Cargar el archivo JSON de usuarios
+    users_file = 'users.json'
+
+    # Crear el portal de autenticación
+    realm = SimpleRealm(data_dir)
+    checker = SimplePasswordChecker(users_file)
+    portal_inst = portal.Portal(realm)
+    portal_inst.registerChecker(checker)
+    print(f"Starting IMAP server on port {port}...")
+
+    reactor.listenTCP(port, IMAPFactory(portal_inst))
     reactor.run()
 
+if __name__ == "__main__":
+    main()

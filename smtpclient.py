@@ -100,6 +100,8 @@ def send_mail(smtp_host, smtp_port, sender, recipient, message, subject, attachm
         recipient (str): Correo del destinatario.
         message (str): Cuerpo del mensaje.
         subject (str): Asunto del correo.
+        attachments (str): Archivos adjuntos al correo a enviar.
+
     """
 
     msg = EmailMessage()
@@ -124,26 +126,13 @@ def send_mail(smtp_host, smtp_port, sender, recipient, message, subject, attachm
                 file_data = f.read()
                 filename = os.path.basename(filepath)
                 msg.add_attachment(file_data, maintype=maintype, subtype=subtype, filename=filename)
-
-
-    # Convertir a bytes para SMTP
-    '''msg_data = msg.as_string()
-
-    msg = EmailMessage()
-    msg["From"] = sender
-    msg["To"] = recipient
-    msg["Subject"] = subject
-    msg['Date'] = email.utils.formatdate(localtime=True)
-    msg['MIME-Version'] = '1.0'
-
-    msg.set_content(message.format(name=recipient))
-'''
     
+    # Se usa la función sendmail de Twisted
     deferred = sendmail(
         smtp_host,
         sender,
         recipient,
-        msg,#msg_data.encode("utf-8"),
+        msg,
         port=smtp_port,
         requireAuthentication=False,
         requireTransportSecurity=False  # False ya que no se está usando SSL
@@ -163,6 +152,7 @@ def send_emails(smtp_host, smtp_port, csv_file, message_file, attachments=None):
         smtp_port: Puerto por el cual se va a hacer la comunicación.
         csv_file: Ruta del archivo CSV de donde se van a extraer la información de los correos
         message_file: Ruta del archivo con el mensaje a enviar.
+        attachments: Archivos adjuntos al correo a enviar.
     
     Returns:
         defer.DeferredList: Lista de deferreds con el estado de cada envío.
