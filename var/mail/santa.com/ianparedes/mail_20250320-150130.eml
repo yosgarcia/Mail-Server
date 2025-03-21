@@ -1,0 +1,29 @@
+From: yosgar@yosgarcia.lat
+To: ianparedes@santa.com
+Subject: Reunion con cliente
+Date: Thu, 20 Mar 2025 15:01:30 -0600
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="===============3856463844775907933=="
+
+--===============3856463844775907933==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Hola, Ian Paredes espero que te encuentres bien.
+
+
+Recuerda que el dia de hoy tenemos la junta con el cliente a las 10:00 am.
+
+Saludos, 
+El equipo
+
+--===============3856463844775907933==
+Content-Type: text/plain
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="file1.txt"
+MIME-Version: 1.0
+
+RXN0byBlcyB1biBhcmNoaXZvIGRlIHRleHRvIGRlIHBydWViYSBwYXJhIGVudmlhciB1biBjb3Jy
+ZW8gY29uIHVuIGFkanVudG8u
+
+--===============3856463844775907933==--
