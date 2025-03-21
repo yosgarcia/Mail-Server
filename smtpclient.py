@@ -222,6 +222,11 @@ def open_gui():
     Se diseña la ventan a desplegar y administra las diferentes
     opciones que tiene el cliente para enviar correos.
     """
+    global attachments_list, attachments_list_manual  # Definimos las listas globalmente
+
+    # Inicializamos las listas para manejar los archivos adjuntos
+    attachments_list = []  # Archivos adjuntos para el envío por lotes
+    attachments_list_manual = []  # Archivos adjuntos para el envío manual
     def send_batch():
         """
         Función local para enviar a través de la interfaz los correos de manera 
@@ -258,6 +263,8 @@ def open_gui():
         subject = subject_manual_entry.get()
         message = message_text.get("1.0", "end").strip()
 
+        attachments = attachments_list_manual
+
         if not all([smtp_host, smtp_port, sender, recipient, subject, message]):
             messagebox.showerror("Error", "Every field must be completed.")
             return
@@ -268,7 +275,7 @@ def open_gui():
 
         try:
             smtp_port = int(smtp_port)
-            d = send_mail(smtp_host, smtp_port, sender, recipient, message, subject)
+            d = send_mail(smtp_host, smtp_port, sender, recipient, message, subject, attachments)
             d.addCallback(lambda _: on_success())
             d.addErrback(lambda err: on_error(err))
             reactor.run()
@@ -285,10 +292,19 @@ def open_gui():
         root.destroy()
         reactor.stop()
 
+    def select_attachments_manual():
+        """
+        Función para seleccionar archivos adjuntos de forma manual.
+        """
+        files = filedialog.askopenfilenames(title="Select Files to Attach", filetypes=[("All Files", "*.*")])
+        if files:
+            attachments_list_manual.extend(files)
+            attachments_label_manual.config(text=f"{len(attachments_list_manual)} file(s) selected")
+
    
     root = ttk.Window(themename="flatly")
     root.title("Client SMTP")
-    root.geometry("800x700")
+    root.geometry("800x800")
 
     
     notebook = ttk.Notebook(root)
@@ -352,9 +368,17 @@ def open_gui():
     subject_manual_entry = ttk.Entry(manual_tab, width=50, font=("Arial", 12))
     subject_manual_entry.pack(pady=5)
 
+    ttk.Label(manual_tab, text="Attachments:", font=("Arial", 12)).pack(anchor="w", padx=20, pady=(10, 0))
+    attachments_label_manual = ttk.Label(manual_tab, text="No files selected", font=("Arial", 10))
+    attachments_label_manual.pack(pady=5)
+    ttk.Button(manual_tab, text="Select Files", bootstyle=SUCCESS, width=20, command=select_attachments_manual)\
+        .pack(pady=5)
+
     ttk.Label(manual_tab, text="Message:", font=("Arial", 12)).pack(anchor="w", padx=20, pady=(10, 0))
     message_text = scrolledtext.ScrolledText(manual_tab, width=60, height=10, font=("Arial", 12))
     message_text.pack(pady=5)
+
+    
 
     
     root.mainloop()
